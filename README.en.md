@@ -66,6 +66,10 @@ Common prompts:
 Show me today's task board.
 ```
 
+![Task board conversation example](assets/screenshots/task-board.png)
+
+This example shows the board workflow: Codex reads `docs/dispatch-board.md`, then summarizes priority, blockers, and the next actionable gate instead of returning a loose task list.
+
 ```text
 Continue the highest-priority unblocked item.
 ```
@@ -81,6 +85,10 @@ Priority: P0
 Fix now: yes
 ```
 
+![New bug conversation example](assets/screenshots/new-bug.png)
+
+This example shows the bug intake workflow: a natural-language problem is converted into a standard bug record, ownership boundary, evidence requirements, and dispatch path.
+
 ```text
 New requirement:
 Background:
@@ -88,6 +96,10 @@ Goal:
 Affected projects:
 Acceptance criteria:
 ```
+
+![New spec conversation example](assets/screenshots/new-spec.png)
+
+This example shows the spec intake workflow: clarify scope and contract first, then dispatch implementation and integration acceptance work.
 
 ```text
 Dispatch BUG-001.

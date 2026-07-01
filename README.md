@@ -59,6 +59,10 @@ Skill is valid!
 给我今天的任务看板。
 ```
 
+![任务面板对话示例](assets/screenshots/task-board.png)
+
+上图展示了看板类问题的典型回答：Codex 先读取 `docs/dispatch-board.md`，再按优先级、阻塞状态和下一步 gate 输出可执行队列。
+
 ```text
 继续处理当前优先级最高的未完成项。
 ```
@@ -74,6 +78,10 @@ Skill is valid!
 是否现在修：立即修复
 ```
 
+![新增 Bug 对话示例](assets/screenshots/new-bug.png)
+
+上图展示了新增 Bug 的处理方式：自然语言问题会被整理为标准 BUG、归属边界、验收证据和后续分发路径。
+
 ```text
 新需求：
 背景：
@@ -81,6 +89,10 @@ Skill is valid!
 涉及工程：
 验收标准：
 ```
+
+![新增 Spec 对话示例](assets/screenshots/new-spec.png)
+
+上图展示了新增 Spec 的处理方式：先澄清范围和公共契约，再进入实现和联调验收，避免需求直接变成无边界编码。
 
 ```text
 分发 BUG-001。
