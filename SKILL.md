@@ -107,4 +107,4 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
 
 详细使用文档在 `references/operating-model.md`，包含可迁移模板、任务状态、证据等级、看板清理规则和 worker prompt 模式。
 
-面向 GitHub 发布和人工阅读的复用说明在 `README.md`，包含流程图、初始化命令、三种运行模式和跨项目迁移步骤。
+面向 GitHub 发布和人工阅读的默认中文复用说明在 `README.md`，英文版在 `README.en.md`；两者包含流程图、初始化命令、三种运行模式和跨项目迁移步骤。
