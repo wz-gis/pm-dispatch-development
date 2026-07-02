@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex.local/pm-dispatch-development/task.schema.json",
+  "title": "PM Dispatch Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "title",
+    "type",
+    "priority",
+    "status",
+    "mode",
+    "lifecycle",
+    "verification",
+    "blockers",
+    "closure",
+    "dependencies",
+    "resources",
+    "runs",
+    "last_updated"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "type": { "type": "string", "enum": ["bug", "spec", "onboarding", "release", "environment", "chore"] },
+    "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+    "status": {
+      "type": "string",
+      "enum": [
+        "NEW",
+        "TRIAGED",
+        "CONTRACT",
+        "READY_FOR_IMPL",
+        "IN_IMPL",
+        "READY_FOR_INTEGRATION",
+        "IN_INTEGRATION",
+        "READY_FOR_CLOSURE",
+        "VERIFIED",
+        "L0_VERIFIED_MOCK",
+        "L1_VERIFIED_MOCK",
+        "L2_VERIFIED_MOCK",
+        "L3_VERIFIED_MOCK",
+        "L4_VERIFIED_MOCK",
+        "PARTIAL_VERIFIED",
+        "ENV_BLOCKED",
+        "CONTRACT_BLOCKED",
+        "THREAD_BLOCKED",
+        "PM_BLOCKED",
+        "CLOSED"
+      ]
+    },
+    "mode": { "type": "string", "enum": ["single-project", "multi-project-integration", "new-project-onboarding"] },
+    "area": { "type": "array", "items": { "type": "string" } },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "owner", "next_action"],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["intake", "triage", "contract", "implementation", "integration", "verification", "closure", "archive"]
+        },
+        "owner": { "type": "string" },
+        "accepted_scope": { "type": ["string", "null"] },
+        "next_action": { "type": "string" },
+        "updated_at": { "type": ["string", "null"] }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_levels", "gate_policy", "evidence_file", "status"],
+      "properties": {
+        "required_levels": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["L0", "L1", "L2", "L3", "L4"] }
+        },
+        "gate_policy": { "type": "string" },
+        "evidence_file": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "PENDING",
+            "L0_VERIFIED",
+            "L1_VERIFIED",
+            "L2_VERIFIED",
+            "L3_VERIFIED",
+            "L4_VERIFIED",
+            "L0_VERIFIED_MOCK",
+            "L1_VERIFIED_MOCK",
+            "L2_VERIFIED_MOCK",
+            "L3_VERIFIED_MOCK",
+            "L4_VERIFIED_MOCK",
+            "PARTIAL",
+            "BLOCKED"
+          ]
+        },
+        "mock_allowed": { "type": "boolean" },
+        "missing": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "status", "description", "owner"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["environment", "contract", "thread", "pm", "dependency", "resource"] },
+          "status": { "type": "string", "enum": ["open", "resolved", "accepted"] },
+          "description": { "type": "string" },
+          "owner": { "type": "string" },
+          "opened_at": { "type": ["string", "null"] },
+          "resolved_at": { "type": ["string", "null"] },
+          "resolution": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string", "enum": ["open", "ready", "closed"] },
+        "accepted_by": { "type": ["string", "null"] },
+        "accepted_at": { "type": ["string", "null"] },
+        "closed_at": { "type": ["string", "null"] },
+        "archived_to": { "type": ["string", "null"] },
+        "notes": { "type": ["string", "null"] }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requires", "blocks"],
+      "properties": {
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["task_id", "required_status"],
+            "properties": {
+              "task_id": { "type": "string" },
+              "required_status": { "type": "string" },
+              "status": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "blocks": { "type": "array", "items": { "type": "string" } },
+        "graph_checked_at": { "type": ["string", "null"] }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locks"],
+      "properties": {
+        "locks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["resource_id", "mode", "holder_run_id", "status"],
+            "properties": {
+              "resource_id": { "type": "string" },
+              "type": { "type": "string" },
+              "mode": { "type": "string", "enum": ["shared", "exclusive"] },
+              "holder_run_id": { "type": "string" },
+              "status": { "type": "string", "enum": ["active", "released", "expired"] },
+              "lease_expires_at": { "type": ["string", "null"] },
+              "scope": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "gate", "worker_type", "status", "attempts"],
+        "properties": {
+          "run_id": { "type": "string" },
+          "gate": { "type": "string", "enum": ["contract", "implementation", "integration", "verification", "closure"] },
+          "worker_type": { "type": "string", "enum": ["codex-thread", "sub-agent", "ci-job", "human"] },
+          "worker_id": { "type": ["string", "null"] },
+          "status": { "type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"] },
+          "allow_parallel": { "type": "boolean" },
+          "started_at": { "type": ["string", "null"] },
+          "finished_at": { "type": ["string", "null"] },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["attempt_id", "status"],
+              "properties": {
+                "attempt_id": { "type": "string" },
+                "status": { "type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"] },
+                "started_at": { "type": ["string", "null"] },
+                "finished_at": { "type": ["string", "null"] },
+                "prompt_file": { "type": ["string", "null"] },
+                "commit": { "type": ["string", "null"] },
+                "lease": {
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "required": ["holder", "acquired_at", "expires_at"],
+                  "properties": {
+                    "holder": { "type": "string" },
+                    "acquired_at": { "type": "string" },
+                    "heartbeat_at": { "type": ["string", "null"] },
+                    "expires_at": { "type": "string" },
+                    "renew_count": { "type": "integer" }
+                  }
+                },
+                "evidence_ref": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "last_updated": { "type": "string" }
+  }
+}

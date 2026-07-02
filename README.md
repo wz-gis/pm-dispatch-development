@@ -149,6 +149,14 @@ L4：
 - AI 功能必须证明成功草案路径，并继续验证 dry-run / 保存 / 启用中的适用链路。
 - mock、dev server、jar、release、真实链路必须分开标注；缺少应测面时不能标记 `VERIFIED`。
 
+新任务必须同时维护 `task.yaml` 和 `evidence.yaml`。`evidence.md` 只保留人工阅读日志；gate 收口前必须运行：
+
+```bash
+python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py docs/tasks/<TASK>/task.yaml
+```
+
+validator 会检查 Schema、Run/Attempt/Lease、依赖图、资源锁、L0-L4 证据、mock fallback 和 Browser/API/SQL/release 等表面证据。
+
 ### 3.2 相似任务合并分发
 
 为了避免每个 Bug 都开一个线程，主控线程会先判断能否合并。合并只共享 Worker，不共享结论；每个任务仍保留独立任务包、证据和状态。
@@ -158,6 +166,7 @@ L4：
 - 同一工程、同一 owner、同一页面 / API / 表 / 模块。
 - 都处在同一 gate，例如都待 Sesame 修复或都待联调。
 - 启动方式、测试数据和回归矩阵基本一致。
+- 依赖图已满足，资源锁兼容。
 - 可以用一个 commit 或一组测试覆盖，并能写清每个任务的证据。
 
 不适合合并：
@@ -165,6 +174,7 @@ L4：
 - 一个任务还需要 PM 或公共契约裁决，另一个已经能编码。
 - 不同仓库 owner、不同工作树或互相冲突的提交范围。
 - 高风险 SQL / release / 真实生产链路任务和普通 UI/API 修复混在一起。
+- 需要同一个 exclusive resource，例如同一 DB migration、release 包、端口或真实账号。
 - 合并后无法逐任务判断通过、阻塞或返修。
 
 批处理 Worker 的默认规模是 2-4 个相似任务；超过 5 个需要 PM 明确确认。某个任务失败时，只拆出失败任务返修，不影响其它已通过任务归档。
@@ -669,18 +679,99 @@ mkdir -p "docs/tasks/${TASK}/prompts"
 cat > "docs/tasks/${TASK}/task.yaml" <<EOF
 id: ${TASK}
 title: 待填写
+type: bug
 priority: P0
 status: TRIAGED
-evidence_level: NONE
-owner: PM
-area: []
 mode: single-project
-threads:
-  contract: null
-  implementation: null
-  integration: null
+area: []
+lifecycle:
+  phase: triage
+  owner: PM
+  accepted_scope: null
+  next_action: define acceptance
+  updated_at: $(date -u +%FT%TZ)
+verification:
+  required_levels: [L1]
+  gate_policy: default
+  evidence_file: evidence.yaml
+  status: PENDING
+  mock_allowed: false
+  missing: []
 blockers: []
+closure:
+  status: open
+  accepted_by: null
+  accepted_at: null
+  closed_at: null
+  archived_to: null
+  notes: null
+dependencies:
+  requires: []
+  blocks: []
+  graph_checked_at: null
+resources:
+  locks: []
+runs: []
 last_updated: $(date +%F)
+EOF
+
+cat > "docs/tasks/${TASK}/evidence.yaml" <<EOF
+task_id: ${TASK}
+generated_at: $(date -u +%FT%TZ)
+verification:
+  changed_surface: []
+  original_user_path: ""
+  runtime_shape: dev
+  test_data: []
+  levels:
+    L0:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L1:
+      status: pending
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L2:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L3:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L4:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+  existing_data_regression: ""
+  uncovered_items: []
+artifacts:
+  commands: []
+  commits: []
+  files_changed: []
+  api: []
+  sql: []
+  browser: []
+  screenshots: []
+  logs: []
+  ids: []
+  upgrade_path: []
+  release_path: []
+runs: []
+blockers: []
+conclusion:
+  status: PARTIAL_VERIFIED
+  evidence_level: NONE
+  mock_based: false
+  real_chain_verified: false
+  accepted_fallback: null
+  notes: "Initial skeleton; not verified."
 EOF
 
 cat > "docs/tasks/${TASK}/evidence.md" <<EOF
@@ -710,6 +801,7 @@ EOF
 提交任务骨架：
 
 ```bash
+python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py "docs/tasks/${TASK}/task.yaml"
 git add "docs/tasks/${TASK}" docs/dispatch-board.md
 git commit -m "docs: add ${TASK} dispatch task"
 ```

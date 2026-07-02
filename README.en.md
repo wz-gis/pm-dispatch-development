@@ -156,6 +156,14 @@ Hard rules:
 - AI features must prove a successful draft path and continue through applicable dry-run / save / enable behavior.
 - Mock, dev server, jar, release, and real-chain evidence must be labeled separately. Missing required surfaces cannot be marked `VERIFIED`.
 
+New tasks must maintain both `task.yaml` and `evidence.yaml`. `evidence.md` is for human-readable notes only. Before gate closeout, run:
+
+```bash
+python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py docs/tasks/<TASK>/task.yaml
+```
+
+The validator checks Schema, Run/Attempt/Lease, dependency graph, resource locks, L0-L4 evidence, mock fallback, and Browser/API/SQL/release surface evidence.
+
 ### 3.2 Batch Dispatch For Similar Tasks
 
 The controller should not mechanically create one thread per bug. When tasks are similar, it should prefer a shared batch worker. The worker is shared; task status and evidence stay separate.
@@ -165,6 +173,7 @@ Good candidates:
 - same project, owner, page / API / table / module,
 - same gate, such as all waiting for Sesame implementation or all waiting for integration,
 - reusable startup commands, test data, and regression matrix,
+- satisfied dependency graph and compatible resource locks,
 - one commit or one test suite can cover the group while still mapping evidence to each task.
 
 Do not batch:
@@ -172,6 +181,7 @@ Do not batch:
 - when one task still needs PM or contract decisions and another is ready to code,
 - across different repository owners, conflicting worktrees, or incompatible commit scopes,
 - high-risk SQL / release / real-production-chain work with ordinary UI/API fixes,
+- when tasks require the same exclusive resource, such as one DB migration, release package, port, or real account,
 - when evidence, blockers, and pass/fail status cannot be judged per task.
 
 The default batch size is 2-4 similar tasks. More than 5 tasks requires explicit PM confirmation. If one task fails, split only that task into repair; do not block already verified tasks in the batch.
@@ -685,18 +695,99 @@ mkdir -p "docs/tasks/${TASK}/prompts"
 cat > "docs/tasks/${TASK}/task.yaml" <<EOF
 id: ${TASK}
 title: TBD
+type: bug
 priority: P0
 status: TRIAGED
-evidence_level: NONE
-owner: PM
-area: []
 mode: single-project
-threads:
-  contract: null
-  implementation: null
-  integration: null
+area: []
+lifecycle:
+  phase: triage
+  owner: PM
+  accepted_scope: null
+  next_action: define acceptance
+  updated_at: $(date -u +%FT%TZ)
+verification:
+  required_levels: [L1]
+  gate_policy: default
+  evidence_file: evidence.yaml
+  status: PENDING
+  mock_allowed: false
+  missing: []
 blockers: []
+closure:
+  status: open
+  accepted_by: null
+  accepted_at: null
+  closed_at: null
+  archived_to: null
+  notes: null
+dependencies:
+  requires: []
+  blocks: []
+  graph_checked_at: null
+resources:
+  locks: []
+runs: []
 last_updated: $(date +%F)
+EOF
+
+cat > "docs/tasks/${TASK}/evidence.yaml" <<EOF
+task_id: ${TASK}
+generated_at: $(date -u +%FT%TZ)
+verification:
+  changed_surface: []
+  original_user_path: ""
+  runtime_shape: dev
+  test_data: []
+  levels:
+    L0:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L1:
+      status: pending
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L2:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L3:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+    L4:
+      status: not_required
+      summary: ""
+      evidence_refs: []
+      commands: []
+  existing_data_regression: ""
+  uncovered_items: []
+artifacts:
+  commands: []
+  commits: []
+  files_changed: []
+  api: []
+  sql: []
+  browser: []
+  screenshots: []
+  logs: []
+  ids: []
+  upgrade_path: []
+  release_path: []
+runs: []
+blockers: []
+conclusion:
+  status: PARTIAL_VERIFIED
+  evidence_level: NONE
+  mock_based: false
+  real_chain_verified: false
+  accepted_fallback: null
+  notes: "Initial skeleton; not verified."
 EOF
 
 cat > "docs/tasks/${TASK}/evidence.md" <<EOF
@@ -726,6 +817,7 @@ EOF
 Commit the task skeleton:
 
 ```bash
+python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py "docs/tasks/${TASK}/task.yaml"
 git add "docs/tasks/${TASK}" docs/dispatch-board.md
 git commit -m "docs: add ${TASK} dispatch task"
 ```

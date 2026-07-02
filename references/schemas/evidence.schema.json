@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex.local/pm-dispatch-development/evidence.schema.json",
+  "title": "PM Dispatch Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "generated_at", "verification", "artifacts", "runs", "blockers", "conclusion"],
+  "properties": {
+    "task_id": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["changed_surface", "original_user_path", "runtime_shape", "test_data", "levels", "existing_data_regression", "uncovered_items"],
+      "properties": {
+        "changed_surface": { "type": "array", "items": { "type": "string" } },
+        "original_user_path": { "type": "string" },
+        "runtime_shape": { "type": "string", "enum": ["dev", "jar", "release", "mock", "real"] },
+        "test_data": { "type": "array", "items": { "type": "string" } },
+        "levels": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "L0": { "$ref": "#/$defs/level" },
+            "L1": { "$ref": "#/$defs/level" },
+            "L2": { "$ref": "#/$defs/level" },
+            "L3": { "$ref": "#/$defs/level" },
+            "L4": { "$ref": "#/$defs/level" }
+          }
+        },
+        "existing_data_regression": { "type": "string" },
+        "uncovered_items": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands", "commits", "files_changed", "api", "sql", "browser", "screenshots", "logs", "ids"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "result"],
+            "properties": {
+              "command": { "type": "string" },
+              "exit_code": { "type": ["integer", "null"] },
+              "result": { "type": "string" },
+              "run_at": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "commits": { "type": "array", "items": { "type": "string" } },
+        "files_changed": { "type": "array", "items": { "type": "string" } },
+        "api": { "type": "array", "items": { "type": "string" } },
+        "sql": { "type": "array", "items": { "type": "string" } },
+        "browser": { "type": "array", "items": { "type": "string" } },
+        "screenshots": { "type": "array", "items": { "type": "string" } },
+        "logs": { "type": "array", "items": { "type": "string" } },
+        "ids": { "type": "array", "items": { "type": "string" } },
+        "upgrade_path": { "type": "array", "items": { "type": "string" } },
+        "release_path": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "attempt_id", "worker_type", "status"],
+        "properties": {
+          "run_id": { "type": "string" },
+          "attempt_id": { "type": "string" },
+          "worker_type": { "type": "string" },
+          "worker_id": { "type": ["string", "null"] },
+          "commit": { "type": ["string", "null"] },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "status", "description"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "status": { "type": "string" },
+          "description": { "type": "string" },
+          "resolution": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "conclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence_level", "mock_based", "real_chain_verified"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "VERIFIED",
+            "L0_VERIFIED_MOCK",
+            "L1_VERIFIED_MOCK",
+            "L2_VERIFIED_MOCK",
+            "L3_VERIFIED_MOCK",
+            "L4_VERIFIED_MOCK",
+            "PARTIAL_VERIFIED",
+            "ENV_BLOCKED",
+            "CONTRACT_BLOCKED",
+            "THREAD_BLOCKED",
+            "PM_BLOCKED"
+          ]
+        },
+        "evidence_level": { "type": "string", "enum": ["NONE", "L0", "L1", "L2", "L3", "L4"] },
+        "mock_based": { "type": "boolean" },
+        "real_chain_verified": { "type": "boolean" },
+        "accepted_fallback": { "type": ["string", "null"] },
+        "notes": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "level": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary"],
+      "properties": {
+        "status": { "type": "string", "enum": ["not_required", "pending", "pass", "pass_mock", "fail", "blocked"] },
+        "summary": { "type": "string" },
+        "evidence_refs": { "type": "array", "items": { "type": "string" } },
+        "commands": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

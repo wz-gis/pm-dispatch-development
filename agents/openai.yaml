@@ -1,4 +1,4 @@
 interface:
   display_name: "PM 调度式开发"
-  short_description: "单工程、多工程联调、证据 gate 与任务归档"
-  default_prompt: "使用 $pm-dispatch-development 分诊这个需求，判断单工程或多工程联调模式，更新任务看板并推进证据 gate。"
+  short_description: "PM 调度、结构化证据、资源锁与 gate 校验"
+  default_prompt: "使用 $pm-dispatch-development 分诊这个需求，更新 task.yaml/evidence.yaml，检查依赖和资源锁，并用 gate policy 推进验收。"

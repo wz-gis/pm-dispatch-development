@@ -1,10 +1,17 @@
 # PM 调度式开发使用文档
 
-这份文档用于把“PM 看板 + 分发 worker + 证据回收 + gate 判定 + 文档归档”的开发模式迁移到其它项目。
+这份文档用于把“PM 看板 + 分发 worker + 证据回收 + gate 判定 + 文档归档”的开发模式迁移到其它项目。当前模型把任务拆成 lifecycle、verification、blocker、closure 四条状态轨道，并用 `task.yaml`、`evidence.yaml`、Run/Attempt/Lease、依赖图、资源锁和 gate validator 保证调度可恢复、可并行、可验收。
 
-## 1. 任务生命周期
+## 1. 任务状态模型
 
-Bug 和 Spec 都使用同一套生命周期：
+Bug 和 Spec 不再只依赖一个状态字段。`task.yaml.status` 是看板摘要，真实推进必须同时读取四条轨道：
+
+1. `lifecycle`：任务所在交付阶段，负责说明下一步应该分诊、契约、实现、联调、验收还是归档。
+2. `verification`：证据要求和证据状态，负责说明必须覆盖哪些 L0-L4、证据文件位置和缺口。
+3. `blockers`：阻塞事实，负责说明环境、契约、worker、PM、依赖或资源锁是否阻塞推进。
+4. `closure`：收口事实，负责说明 PM 是否接受、是否关闭、是否归档。
+
+Lifecycle 推荐阶段：
 
 1. `NEW`：请求已捕获，尚未分析。
 2. `TRIAGED`：owner、影响面、优先级和验收标准已明确。
@@ -15,7 +22,7 @@ Bug 和 Spec 都使用同一套生命周期：
 7. `IN_INTEGRATION`：真实或 PM 接受的 mock 联调正在执行。
 8. `VERIFIED`、`PARTIAL_VERIFIED`、`ENV_BLOCKED`、`CONTRACT_BLOCKED`、`THREAD_BLOCKED` 或 `PM_BLOCKED`。
 
-只有当前 gate 的证据已经写入文档，才能推进任务状态。
+只有当前 gate 的结构化证据已经写入 `evidence.yaml`，并且 gate validator 通过或产生明确 blocker，才能推进任务状态。`evidence.md` 可以保留人类可读叙述，但不得作为唯一证据源。
 
 ## 2. 运行模式
 
@@ -53,7 +60,7 @@ TRIAGED -> CONTRACT -> READY_FOR_IMPL -> 多工程 IN_IMPL -> READY_FOR_INTEGRAT
 - 在 `task.yaml.area` 列出所有工程，例如 `frontend`、`backend`、`worker`、`database`。
 - 每个工程可以有独立实现 Worker；共享字段、API、状态机和页面行为必须先在契约中固定。
 - 联调 Worker 统一验证跨工程链路，必须记录服务启动方式、端口、PID、日志路径、测试数据、API/SQL/Browser、关键 ID 和阻塞项。
-- 任何真实环境不可用的 fallback 都必须由 PM 接受，并在 `evidence.md` 标注 `mock-based`。
+- 任何真实环境不可用的 fallback 都必须由 PM 接受，并在 `evidence.yaml.conclusion.accepted_fallback` 与 `evidence.md` 同时标注 `mock-based`。
 
 常用触发语：
 
@@ -124,6 +131,30 @@ L4：
 
 如果矩阵中的应测项没有覆盖，结论不能写 `VERIFIED`。应选择 `PARTIAL_VERIFIED`、`ENV_BLOCKED`、`PM_BLOCKED`，或生成返修 prompt。
 
+### 3.2 结构化证据
+
+每个任务必须有两个证据文件：
+
+- `evidence.yaml`：机器可校验事实源，必须符合 `references/schemas/evidence.schema.json`。
+- `evidence.md`：面向 PM 的叙述日志，记录上下文、摘要和人工判断。
+
+`evidence.yaml` 至少记录：
+
+- `verification.changed_surface`：改动面，例如 `ui`、`api`、`sql`、`release`。
+- `verification.original_user_path`：用户反馈的原始路径。
+- `verification.runtime_shape`：`dev`、`jar`、`release`、`mock` 或 `real`。
+- `verification.levels.L0-L4`：每级证据的 `status`、摘要、命令和引用。
+- `artifacts`：commands、commits、files_changed、api、sql、browser、screenshots、logs、ids、upgrade_path、release_path。
+- `runs`：产生证据的 run、attempt、worker 和 commit。
+- `blockers`：本轮仍未解决或已接受的阻塞。
+- `conclusion`：最终状态、最高证据等级、是否 mock、真实链路是否通过、PM 接受的 fallback。
+
+提升 gate 前运行：
+
+```bash
+python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py docs/tasks/<TASK>/task.yaml
+```
+
 ## 4. 任务目录
 
 最小任务目录：
@@ -131,6 +162,7 @@ L4：
 ```text
 docs/tasks/BUG-000/
 ├── task.yaml
+├── evidence.yaml
 ├── evidence.md
 ├── decisions.md
 └── prompts/
@@ -139,26 +171,50 @@ docs/tasks/BUG-000/
     └── 03-integration.md
 ```
 
-`task.yaml` 推荐字段：
+`task.yaml` 必须符合 `references/schemas/task.schema.json`。推荐骨架：
 
 ```yaml
 id: BUG-000
 title: 简短标题
+type: bug
 priority: P0
 status: TRIAGED
-evidence_level: NONE
-owner: PM
+mode: multi-project-integration
 area:
   - frontend
   - backend
-mode: multi-project-integration
-threads:
-  contract: null
-  implementation: null
-  integration: null
+lifecycle:
+  phase: triage
+  owner: PM
+  accepted_scope: null
+  next_action: define contract
+  updated_at: 2026-07-01T00:00:00Z
+verification:
+  required_levels: [L1, L2, L3]
+  gate_policy: default
+  evidence_file: evidence.yaml
+  status: PENDING
+  mock_allowed: false
+  missing: []
 blockers: []
+closure:
+  status: open
+  accepted_by: null
+  accepted_at: null
+  closed_at: null
+  archived_to: null
+  notes: null
+dependencies:
+  requires: []
+  blocks: []
+  graph_checked_at: null
+resources:
+  locks: []
+runs: []
 last_updated: 2026-07-01
 ```
+
+向后兼容：旧任务可以保留 `evidence.md` 和历史 `threads` 字段作为人工线索，但新任务必须使用 `runs` 记录 worker。
 
 `evidence.md` 推荐结构：
 
@@ -223,8 +279,43 @@ last_updated: 2026-07-01
 
 - 默认 worker 类型是 `codex-thread`：使用 Codex 可见后台线程分发，让用户能在侧边栏看到并打开。
 - 内部 `sub-agent` 只能在用户明确允许使用 sub-agent、子智能体或内部 worker 时使用。
-- 看板和 `task.yaml.threads` 必须记录 worker ID，并标明 worker 类型，例如 `codex-thread:<thread-id>` 或 `sub-agent:<agent-id>`。
+- 看板和 `task.yaml.runs[].worker_id` 必须记录 worker ID，并标明 worker 类型，例如 `codex-thread:<thread-id>` 或 `sub-agent:<agent-id>`。
 - 如果旧 worker 是不可见 sub-agent 且用户没有明确授权，应标记 `THREAD_BLOCKED` 或重新分发到可见 Codex 线程。
+
+### Run / Attempt / Lease
+
+- `Run`：一次 gate 分发单元，例如 BUG-001 的 implementation run。
+- `Attempt`：Run 的一次具体尝试；重试、返修或 worker 失联后重新分发都必须新建 attempt。
+- `Lease`：运行中 attempt 的租约，包含 holder、acquired_at、heartbeat_at、expires_at、renew_count。
+
+分发规则：
+
+- 同一任务、同一 gate 默认只能有一个 `queued` 或 `running` run，除非 run 显式 `allow_parallel: true` 且资源锁兼容。
+- 分发前必须检查是否已有未过期 lease；有则复用或等待，不得重复分发。
+- heartbeat 看到 worker 仍在运行时，只续租 lease 和汇报状态，不做文档 churn。
+- lease 到期且 worker 无回应时，把 attempt 标记 `expired`，释放资源锁，再选择重试、返修或 `THREAD_BLOCKED`。
+- worker 完成后，把 attempt 标记 `succeeded`、`failed` 或 `blocked`，写入 commit 和 evidence_ref。
+
+### 依赖图与资源锁
+
+依赖写入 `task.yaml.dependencies`：
+
+- `requires`：当前任务开始某阶段前必须满足的任务和状态。
+- `blocks`：当前任务完成后可解锁的下游任务。
+- `graph_checked_at`：最近一次检查时间。
+
+资源锁写入 `task.yaml.resources.locks`：
+
+- 对会冲突的 repo、branch、database、port、release package、真实环境账号、migration window 使用 `exclusive`。
+- 对可并行读取的文档、只读 API、共享 fixtures 使用 `shared`。
+- exclusive lock 与任何其它 active lock 冲突；shared lock 只与 exclusive lock 冲突。
+- 锁必须绑定 holder_run_id 和 lease_expires_at；lease 过期后锁不得继续阻塞其它任务。
+
+批量或并行分发前运行 validator 的 `--tasks-dir` 模式检查全局依赖和锁：
+
+```bash
+python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
+```
 
 ### 任务合并与批处理 Worker
 
@@ -235,6 +326,7 @@ last_updated: 2026-07-01
 - 同一工程、同一 owner、同一代码区域或同一页面 / API / 表。
 - 同一 gate，例如都在实现、都在联调或都在环境复验。
 - 启动方式、测试数据和回归矩阵可复用。
+- 依赖图无未满足前置，资源锁兼容。
 - 一个 commit 或一组测试可以清晰映射到多个任务。
 - 任一任务失败时，可以拆出独立返修，不影响其它任务归档。
 
@@ -244,11 +336,13 @@ last_updated: 2026-07-01
 - 不同仓库 owner、不同工作树、不同 release 节奏或互相冲突的 commit 范围。
 - 破坏性 SQL、release 打包、真实生产链路、高风险迁移与普通页面 / API 修复混在一起。
 - P0 紧急故障会被低优先级任务拖慢。
+- 需要同一个 exclusive resource，例如同一 DB migration、同一 release 包、同一端口或同一真实账号。
 - 合并后无法逐任务记录证据、状态、未覆盖项和阻塞原因。
 
 批处理规则：
 
-- 每个任务仍有独立 `task.yaml`、`evidence.md`、`decisions.md`。
+- 每个任务仍有独立 `task.yaml`、`evidence.yaml`、`evidence.md`、`decisions.md`。
+- 批处理 worker 可以共享 run，但每个任务必须保留独立 evidence 和 conclusion。
 - 看板可多个任务指向同一 `batch-worker:<thread-id>`。
 - 默认批量规模 2-4 个任务；超过 5 个需要 PM 确认。
 - worker prompt 必须包含 `batchId`、任务清单、共享上下文、逐任务验收标准、逐任务停止条件和失败拆分规则。
@@ -260,15 +354,24 @@ last_updated: 2026-07-01
 - 分发 `codex-thread` worker 后，默认创建或更新 thread heartbeat 自动巡检；只有用户明确说不要轮询时才跳过。
 - 短任务默认频率：每 5 分钟一次，最多 12 次；更长任务可以降低频率或改为人工 checkpoint。
 - 自动巡检必须记录到看板或 evidence：automation ID、目标 worker ID、频率、停止条件。
-- 自动巡检 prompt 必须包含：读取 board/runbook/task/evidence/decisions/current prompt，读取 worker 线程状态，区分运行中和已完成。
-- worker 仍在运行时：只中文简短汇报当前进展，不更新文档，不提交。
-- worker 完成时：回收 commit、files、tests、API/SQL/Browser、端口、日志、阻塞和 gate 建议；更新 evidence、task.yaml、dispatch-board、bug tracker；运行文档校验后提交 PM 文档。
+- 自动巡检 prompt 必须包含：读取 board/runbook/task/evidence.yaml/evidence.md/decisions/current prompt，读取 worker 线程状态，区分运行中、失联和已完成。
+- worker 仍在运行时：只续租 lease 并中文简短汇报当前进展，不更新其它文档，不提交。
+- worker 失联或 lease 过期时：标记 attempt expired，释放资源锁，再决定重试或 THREAD_BLOCKED。
+- worker 完成时：回收 commit、files、tests、API/SQL/Browser、端口、日志、阻塞和 gate 建议；更新 evidence.yaml、evidence.md、task.yaml、dispatch-board、bug tracker；运行 gate validator 后提交 PM 文档。
 - PM 收口后删除或暂停 heartbeat，避免对已归档任务重复巡检。
 
 ## 6. Worker Prompt 模板
 
 ```markdown
 你正在处理 <TASK-ID>。
+
+调度身份：
+- run_id：
+- attempt_id：
+- worker_type：
+- worker_id：
+- lease_expires_at：
+- resource_locks：
 
 批处理信息（如适用）：
 - batchId：
@@ -297,6 +400,7 @@ last_updated: 2026-07-01
 - 列出修改文件。
 - 执行 <commands>。
 - 提供 API/curl/SQL/Browser 证据。
+- 提供可写入 evidence.yaml 的结构化摘要。
 - 按回归矩阵说明用户原始路径、启动形态、测试数据、存量数据回归和未覆盖项。
 - 明确说明阻塞项。
 
@@ -335,25 +439,36 @@ last_updated: 2026-07-01
 
 ```markdown
 继续 <TASK-ID> 自动调度巡检。
-先读取 board、runbook、task.yaml、evidence.md、decisions.md 和当前 prompt。
+先读取 board、runbook、task.yaml、evidence.yaml、evidence.md、decisions.md 和当前 prompt。
 读取 worker 线程 <ID> 最新状态。
-如果线程仍在运行，只简短更新状态，不改文档。
+如果线程仍在运行且 lease 未过期，只续租 lease 并简短更新状态，不改其它文档。
+如果 lease 已过期或 worker 失联，标记 attempt expired，释放资源锁，并决定重试或 THREAD_BLOCKED。
 如果线程完成，提取 commit/files/tests/API/SQL/Browser/evidence/blockers，
-更新任务证据、任务状态、看板和 bug tracker，并提交 docs。
+更新 evidence.yaml、任务证据、任务状态、看板和 bug tracker，运行 gate validator，并提交 docs。
 收口后删除或暂停本 heartbeat。
 ```
 
 ## 8. Gate 判定
 
 - `VERIFIED`：真实验收路径通过，无未解决阻塞。
-- `L3_VERIFIED`：页面工作流通过，但不要求完整 L4。
-- `L4_VERIFIED`：真实端到端链路通过。
 - `L*_VERIFIED_MOCK`：PM 接受 mock fallback，且证据明确标注。
 - `PARTIAL_VERIFIED`：部分关键面通过，但不足以 verified。
 - `ENV_BLOCKED`：token、DB、服务、Browser、磁盘、真实日志、网络或外部系统阻塞。
 - `CONTRACT_BLOCKED`：公共语义或归属不清。
 - `THREAD_BLOCKED`：worker 越界、反复失败或无法推进。
 - `PM_BLOCKED`：产品行为、风险或取舍需要 PM 决定。
+
+Gate policy 必须自动校验：
+
+- Schema：`task.yaml` 和 `evidence.yaml` 字段完整、枚举合法。
+- Run/Lease：运行中 run 必须有未过期 lease，同 gate 不得重复活跃分发。
+- Dependency：已进入实现、联调或收口的任务必须满足 `dependencies.requires`。
+- Resource lock：exclusive lock 不得与其它 active lock 并存。
+- Evidence：required L0-L4 必须 pass 或 pass_mock；mock 必须有 accepted_fallback。
+- Surface：UI/L3 要 Browser，API/L2 要 API/curl/SQL/command，SQL/release 要 upgrade_path 或 release_path。
+- Blocker：open blocker 存在时不得 verified-like。
+
+Validator 失败时只能选择三种动作：补证据、生成返修 prompt、或记录 blocker / PM decision。
 
 ## 9. PM 评审问题
 
@@ -366,6 +481,7 @@ last_updated: 2026-07-01
 - 如果是新工程接入，最小健康检查和最小验收链路是什么？
 - 真实日志或真实环境不可用时，是否接受 mock 证据？
 - 是否需要更新公共契约？
+- 是否有未满足依赖或会冲突的资源锁？
 - 哪些回归任务必须保持通过？
 - 如果 worker 证明原方案不安全，应如何停止或升级？
 
@@ -385,6 +501,9 @@ last_updated: 2026-07-01
 - 旧库升级、SQL update、打包脚本、启动脚本没有被真实执行。
 - 使用旧截图或旧 curl 输出，却没有日期、ID 或命令。
 - 不保存中间证据，一次跳过多个 gate。
+- 不检查 lease 就重复分发同一 gate。
+- 不声明资源锁就并行跑会冲突的 DB、端口、release 或真实账号任务。
+- validator 失败但仍人工标绿。
 
 ## 11. 跨项目落地清单
 
@@ -393,12 +512,15 @@ last_updated: 2026-07-01
 1. 创建 `docs/dispatch-board.md`。
 2. 创建 `docs/dispatcher-runbook.md`。
 3. 创建 `docs/tasks/<TASK>/` 目录。
-4. 定义证据等级和终态。
-5. 定义 PM 线程允许修改哪些仓库。
-6. 默认把 worker 分发到 Codex 可见后台线程；只有用户明确授权时才使用内部 sub-agent。
-7. 为可见 worker 创建 heartbeat 自动巡检，并记录 automation ID、频率和停止条件。
-8. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
-9. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
-10. 每个 gate 要求提交文档更新。
-11. 为跨任务承诺增加 regression guard。
-12. 每天清理看板并归档终态任务，收口后删除或暂停对应 heartbeat。
+4. 按 schema 创建 `task.yaml` 和 `evidence.yaml`。
+5. 定义证据等级、gate policy 和终态。
+6. 定义 PM 线程允许修改哪些仓库。
+7. 默认把 worker 分发到 Codex 可见后台线程；只有用户明确授权时才使用内部 sub-agent。
+8. 为可见 worker 创建 heartbeat 自动巡检，并记录 automation ID、频率和停止条件。
+9. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
+10. 每次分发写入 Run/Attempt/Lease。
+11. 为并行任务声明 dependencies 和 resources.locks。
+12. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
+13. 每个 gate 要求提交文档更新，并运行 `scripts/validate_pm_dispatch.py`。
+14. 为跨任务承诺增加 regression guard。
+15. 每天清理看板并归档终态任务，收口后删除或暂停对应 heartbeat。
