@@ -25,6 +25,8 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
 - 产品代码修改应留在实现 worker 或用户明确授权的实现会话中。
 - 分发 worker 时，默认使用 Codex 可见后台线程，让用户能在侧边栏看到线程；内部 sub-agent 只有在用户明确允许时才使用。
 - 记录 worker ID 时必须标明 worker 类型：`codex-thread`、`sub-agent`、`ci-job` 或 `human`。
+- 分发可见 Codex worker 后，默认创建或更新 thread heartbeat 自动巡检；只有用户明确说不要轮询时才跳过。
+- 看板和证据必须记录巡检 automation ID、频率和停止条件。
 - 有依赖关系时使用串行 gate：公共契约 -> 实现 -> 联调 -> 最终复验。
 - 只有边界独立、无共享状态时才并行分发。
 - 以文档作为事实源：看板、任务元数据、证据、决策、prompt、回归守卫。
@@ -53,13 +55,17 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
    - 写清 worker prompt 的目标、范围、允许文件、必需证据、测试和阻塞条件。
    - 默认创建或复用 Codex 可见后台线程进行分发，并把可见线程 ID 写回任务元数据和看板。
    - 不使用内部 sub-agent，除非用户明确说允许使用 sub-agent、子智能体或内部 worker。
+   - 默认为可见 worker 创建或更新 heartbeat 自动巡检，短任务建议每 5 分钟轮询一次、最多 12 次；按任务风险可调整频率和次数。
+   - 自动巡检 prompt 必须读取看板、任务元数据、证据、决策和 worker 线程；worker 仍在运行时只汇报状态，不做文档 churn；worker 完成后回收证据、更新 gate 并提交 PM 文档。
    - 有依赖时串行分发；没有共享状态和顺序依赖时才并行分发。
-   - 将 worker ID 回写任务元数据和看板。
+   - 将 worker ID 和巡检 automation ID 回写任务元数据、看板或 evidence。
 
 5. **巡检**
+   - 优先依赖已登记的 heartbeat 自动巡检；用户询问状态时也可以立即手动读取 worker 线程。
    - worker 仍在运行时，只简短汇报状态，不做文档 churn。
    - worker 完成后，提取 commit、修改文件、测试、API/SQL/Browser 证据、阻塞和建议下一 gate。
    - 按需更新证据、任务元数据、看板和 bug tracker。
+   - worker 完成并完成 PM 收口后，删除或暂停对应 heartbeat，避免重复巡检。
 
 6. **Gate 判定**
    - `VERIFIED`: real acceptance evidence passes with no unresolved blocker.

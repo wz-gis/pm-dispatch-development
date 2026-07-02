@@ -196,6 +196,16 @@ last_updated: 2026-07-01
 - 看板和 `task.yaml.threads` 必须记录 worker ID，并标明 worker 类型，例如 `codex-thread:<thread-id>` 或 `sub-agent:<agent-id>`。
 - 如果旧 worker 是不可见 sub-agent 且用户没有明确授权，应标记 `THREAD_BLOCKED` 或重新分发到可见 Codex 线程。
 
+### 自动巡检规则
+
+- 分发 `codex-thread` worker 后，默认创建或更新 thread heartbeat 自动巡检；只有用户明确说不要轮询时才跳过。
+- 短任务默认频率：每 5 分钟一次，最多 12 次；更长任务可以降低频率或改为人工 checkpoint。
+- 自动巡检必须记录到看板或 evidence：automation ID、目标 worker ID、频率、停止条件。
+- 自动巡检 prompt 必须包含：读取 board/runbook/task/evidence/decisions/current prompt，读取 worker 线程状态，区分运行中和已完成。
+- worker 仍在运行时：只中文简短汇报当前进展，不更新文档，不提交。
+- worker 完成时：回收 commit、files、tests、API/SQL/Browser、端口、日志、阻塞和 gate 建议；更新 evidence、task.yaml、dispatch-board、bug tracker；运行文档校验后提交 PM 文档。
+- PM 收口后删除或暂停 heartbeat，避免对已归档任务重复巡检。
+
 ## 6. Worker Prompt 模板
 
 ```markdown
@@ -263,6 +273,7 @@ last_updated: 2026-07-01
 如果线程仍在运行，只简短更新状态，不改文档。
 如果线程完成，提取 commit/files/tests/API/SQL/Browser/evidence/blockers，
 更新任务证据、任务状态、看板和 bug tracker，并提交 docs。
+收口后删除或暂停本 heartbeat。
 ```
 
 ## 8. Gate 判定
@@ -313,8 +324,9 @@ last_updated: 2026-07-01
 4. 定义证据等级和终态。
 5. 定义 PM 线程允许修改哪些仓库。
 6. 默认把 worker 分发到 Codex 可见后台线程；只有用户明确授权时才使用内部 sub-agent。
-7. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
-8. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
-9. 每个 gate 要求提交文档更新。
-10. 为跨任务承诺增加 regression guard。
-11. 每天清理看板并归档终态任务。
+7. 为可见 worker 创建 heartbeat 自动巡检，并记录 automation ID、频率和停止条件。
+8. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
+9. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
+10. 每个 gate 要求提交文档更新。
+11. 为跨任务承诺增加 regression guard。
+12. 每天清理看板并归档终态任务，收口后删除或暂停对应 heartbeat。
