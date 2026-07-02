@@ -125,6 +125,32 @@ Prepare release-readiness acceptance.
 Accept BUG-001 verification.
 ```
 
+### 3.1 Acceptance Gate Rules
+
+To avoid "local checks passed, real workflow regressed", every implementation or integration closeout must include a regression matrix:
+
+```text
+Changed surface:
+Original user workflow:
+Runtime shape: dev / jar / release / mock / real
+Test data: projectId / taskId / snapshotId / file / log
+L1:
+L2:
+L3:
+L4:
+Existing-data regression:
+Uncovered items:
+Conclusion:
+```
+
+Hard rules:
+
+- UI changes require Browser click evidence. API or SQL evidence cannot replace L3 UI evidence.
+- SQL, schema, startup-script, packaging-script, and release-static changes require upgrade or release-path evidence.
+- Changes touching scanning, indexing, log diagnosis, rules, or reports must verify existing projects and stored data do not regress.
+- AI features must prove a successful draft path and continue through applicable dry-run / save / enable behavior.
+- Mock, dev server, jar, release, and real-chain evidence must be labeled separately. Missing required surfaces cannot be marked `VERIFIED`.
+
 ### 4. Three Ways To Start
 
 #### 4.1 You Do Not Have A Project Yet

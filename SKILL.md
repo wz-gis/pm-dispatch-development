@@ -32,6 +32,9 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
 - 以文档作为事实源：看板、任务元数据、证据、决策、prompt、回归守卫。
 - 不凭“已完成”口头结论关单；必须有命令、产物、ID、截图、SQL/API 输出或明确阻塞。
 - 真实环境不可用时，只有 PM 接受 mock fallback，且证据明确标注 mock-based，才可作为 mock 验收。
+- 证据必须匹配改动表面：页面改动要有 Browser 证据，接口改动要有 API 证据，SQL / release 改动要有升级或打包路径证据。
+- 先验证用户原始路径和存量数据，再验证理想路径；不能用新造 happy path 掩盖旧工程、旧库或旧页面回退。
+- 开发态、release 态、mock 态、真实链路必须分开标注；任一应测面缺失时，不得标记 `VERIFIED`。
 
 ## 工作流
 
@@ -50,9 +53,11 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
    - 创建或更新任务目录，包括 `task.yaml`、`evidence.md`、`decisions.md` 和 prompt 文件。
    - 用可观察证据写验收标准，不写模糊描述。
    - 记录约束：禁止修改的仓库、是否允许 mock、必须走的真实链路、回归范围和停止条件。
+   - 为每个实现或联调任务写明最小回归矩阵：改动面、用户原始路径、启动形态、测试数据、L1/L2/L3/L4、存量数据回归和未覆盖项。
 
 4. **分发**
    - 写清 worker prompt 的目标、范围、允许文件、必需证据、测试和阻塞条件。
+   - 写清本轮必须验证的真实用户路径；UI 任务必须要求 Browser 点击证据，SQL / release 任务必须要求升级或打包路径证据，AI 任务必须要求成功路径证据。
    - 默认创建或复用 Codex 可见后台线程进行分发，并把可见线程 ID 写回任务元数据和看板。
    - 不使用内部 sub-agent，除非用户明确说允许使用 sub-agent、子智能体或内部 worker。
    - 默认为可见 worker 创建或更新 heartbeat 自动巡检，短任务建议每 5 分钟轮询一次、最多 12 次；按任务风险可调整频率和次数。
@@ -75,6 +80,7 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
    - `CONTRACT_BLOCKED`: field semantics, API contract, ownership, or compatibility is unclear.
    - `THREAD_BLOCKED`: worker cannot proceed or violated scope.
    - `PM_BLOCKED`: product decision or tradeoff requires PM confirmation.
+   - 缺少应测 Browser、API、SQL、release、存量数据或真实链路证据时，不得提升到 `VERIFIED`；只能标记部分通过、环境阻塞、PM 阻塞或返修。
 
 7. **收口**
    - 除非用户明确要求，否则文档提交和产品代码提交分开。
@@ -90,6 +96,7 @@ description: 使用 PM 调度式开发模式管理软件交付，适用于单工
 - 必需启动方式或环境假设。
 - 必须返回的证据：git status、commit hash、修改文件、命令、测试结果、API/curl、SQL、Browser、截图、日志、ID、阻塞。
 - 与变更面相关的回归检查。
+- 用户原始路径、启动形态、测试数据和存量数据回归要求。
 - 停止条件和升级路径。
 - 是否允许 mock 证据，以及如何标注。
 

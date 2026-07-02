@@ -94,6 +94,36 @@ NEW -> TRIAGED -> CONTRACT -> 接入核对 -> READY_FOR_IMPL -> IN_IMPL -> IN_IN
 
 证据等级和任务结论不要混用。例如：`PARTIAL_VERIFIED / L2_VERIFIED` 表示接口通过，但 Browser 或真实环境仍阻塞。
 
+### 3.1 回归放行红线
+
+使用这个模式时，PM gate 只认可与改动表面一致的证据。
+
+- 页面、按钮、tab、弹框、表格或路由改动：必须有 Browser 点击证据；API、SQL、静态检查只能作为辅助。
+- API、DTO、状态机、异步任务改动：必须有 curl / API / 任务 ID / 状态流转证据。
+- SQL、表结构、迁移、启动脚本、打包脚本或 release 静态资源改动：必须有旧库或现有库升级路径、打包路径或 release 启动证据。
+- AI 功能：必须验证真实 provider 或 PM 接受的可控 provider 成功返回，并继续验证后续 dry-run / 保存 / 启用 / 展示中的适用链路；只验证失败降级不算通过。
+- 核心业务链路：必须先验证用户反馈的原始路径，再验证修复后的理想路径。
+- 存量数据：涉及扫描、索引、日志、规则或报告时，必须抽查既有工程、旧任务、latestSuccess / PARTIAL_SUCCESS 或历史数据不回退。
+- 环境形态：dev server、jar 内置静态资源、release 包、mock 数据、真实链路必须分别标注，不能混用结论。
+
+每个实现或联调 evidence 至少包含：
+
+```text
+改动面：
+用户原始路径：
+启动形态：dev / jar / release / mock / real
+测试数据：projectId / taskId / snapshotId / 文件 / 日志 / 用户输入
+L1：
+L2：
+L3：
+L4：
+存量数据回归：
+未覆盖项：
+结论：
+```
+
+如果矩阵中的应测项没有覆盖，结论不能写 `VERIFIED`。应选择 `PARTIAL_VERIFIED`、`ENV_BLOCKED`、`PM_BLOCKED`，或生成返修 prompt。
+
 ## 4. 任务目录
 
 最小任务目录：
@@ -231,6 +261,7 @@ last_updated: 2026-07-01
 - 列出修改文件。
 - 执行 <commands>。
 - 提供 API/curl/SQL/Browser 证据。
+- 按回归矩阵说明用户原始路径、启动形态、测试数据、存量数据回归和未覆盖项。
 - 明确说明阻塞项。
 
 停止条件：
@@ -311,6 +342,11 @@ last_updated: 2026-07-01
 - 新工程接入没有启动、健康检查和最小验收路径。
 - 契约要求 ingestion/indexing 修复，却用 query 层兜底绕过。
 - 把 mock 证据当真实证据。
+- 用 API / SQL 通过替代页面点击通过。
+- 用源码 dev server 通过替代 jar 内置静态资源或 release 包通过。
+- 用新造数据通过替代存量工程 / 存量任务回归。
+- AI 只测失败降级，不测成功草案和后续链路。
+- 旧库升级、SQL update、打包脚本、启动脚本没有被真实执行。
 - 使用旧截图或旧 curl 输出，却没有日期、ID 或命令。
 - 不保存中间证据，一次跳过多个 gate。
 
