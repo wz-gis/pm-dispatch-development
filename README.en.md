@@ -23,6 +23,7 @@ Use this skill for:
 - **New bugs**: deduplicate, classify, capture reproduction and evidence, then decide whether to fix now.
 - **Continuing active work**: pick the highest-priority unblocked task from the board.
 - **Dispatching work**: create contract, implementation, integration, or environment-verification workers.
+- **Batch dispatching**: group similar bugs or specs with the same project, owner, gate, and regression surface into one batch worker to reduce thread and monitoring overhead.
 - **Closing worker threads**: collect commit, test, API, SQL, UI, log, and blocker evidence.
 - **Regression planning**: choose L0-L4 checks based on the actual blast radius.
 - **Blocker triage**: separate code issues, contract ambiguity, environment blockers, and PM decisions.
@@ -106,6 +107,10 @@ Dispatch BUG-001.
 ```
 
 ```text
+Batch-dispatch BUG-001, BUG-002, and BUG-003 to the same Sesame worker, but keep separate evidence and status for each task.
+```
+
+```text
 Dispatch BUG-001 only. Do not start automatic monitoring.
 ```
 
@@ -150,6 +155,26 @@ Hard rules:
 - Changes touching scanning, indexing, log diagnosis, rules, or reports must verify existing projects and stored data do not regress.
 - AI features must prove a successful draft path and continue through applicable dry-run / save / enable behavior.
 - Mock, dev server, jar, release, and real-chain evidence must be labeled separately. Missing required surfaces cannot be marked `VERIFIED`.
+
+### 3.2 Batch Dispatch For Similar Tasks
+
+The controller should not mechanically create one thread per bug. When tasks are similar, it should prefer a shared batch worker. The worker is shared; task status and evidence stay separate.
+
+Good candidates:
+
+- same project, owner, page / API / table / module,
+- same gate, such as all waiting for Sesame implementation or all waiting for integration,
+- reusable startup commands, test data, and regression matrix,
+- one commit or one test suite can cover the group while still mapping evidence to each task.
+
+Do not batch:
+
+- when one task still needs PM or contract decisions and another is ready to code,
+- across different repository owners, conflicting worktrees, or incompatible commit scopes,
+- high-risk SQL / release / real-production-chain work with ordinary UI/API fixes,
+- when evidence, blockers, and pass/fail status cannot be judged per task.
+
+The default batch size is 2-4 similar tasks. More than 5 tasks requires explicit PM confirmation. If one task fails, split only that task into repair; do not block already verified tasks in the batch.
 
 ### 4. Three Ways To Start
 

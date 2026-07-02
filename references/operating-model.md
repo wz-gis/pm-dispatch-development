@@ -226,6 +226,35 @@ last_updated: 2026-07-01
 - 看板和 `task.yaml.threads` 必须记录 worker ID，并标明 worker 类型，例如 `codex-thread:<thread-id>` 或 `sub-agent:<agent-id>`。
 - 如果旧 worker 是不可见 sub-agent 且用户没有明确授权，应标记 `THREAD_BLOCKED` 或重新分发到可见 Codex 线程。
 
+### 任务合并与批处理 Worker
+
+默认先判断能否合并相似任务，避免每个 BUG / SPEC 都创建独立线程。
+
+可以合并：
+
+- 同一工程、同一 owner、同一代码区域或同一页面 / API / 表。
+- 同一 gate，例如都在实现、都在联调或都在环境复验。
+- 启动方式、测试数据和回归矩阵可复用。
+- 一个 commit 或一组测试可以清晰映射到多个任务。
+- 任一任务失败时，可以拆出独立返修，不影响其它任务归档。
+
+禁止合并：
+
+- 一个任务仍需公共契约或 PM 裁决，另一个已可实施。
+- 不同仓库 owner、不同工作树、不同 release 节奏或互相冲突的 commit 范围。
+- 破坏性 SQL、release 打包、真实生产链路、高风险迁移与普通页面 / API 修复混在一起。
+- P0 紧急故障会被低优先级任务拖慢。
+- 合并后无法逐任务记录证据、状态、未覆盖项和阻塞原因。
+
+批处理规则：
+
+- 每个任务仍有独立 `task.yaml`、`evidence.md`、`decisions.md`。
+- 看板可多个任务指向同一 `batch-worker:<thread-id>`。
+- 默认批量规模 2-4 个任务；超过 5 个需要 PM 确认。
+- worker prompt 必须包含 `batchId`、任务清单、共享上下文、逐任务验收标准、逐任务停止条件和失败拆分规则。
+- heartbeat 可以共用一个 automation，但完成后必须逐任务更新状态。
+- 一个 commit 可以覆盖多个任务，但 evidence 必须写清任务 ID、修改文件、测试和验证证据的映射关系。
+
 ### 自动巡检规则
 
 - 分发 `codex-thread` worker 后，默认创建或更新 thread heartbeat 自动巡检；只有用户明确说不要轮询时才跳过。
@@ -240,6 +269,13 @@ last_updated: 2026-07-01
 
 ```markdown
 你正在处理 <TASK-ID>。
+
+批处理信息（如适用）：
+- batchId：
+- 任务清单：
+- 共享上下文：
+- 逐任务验收标准：
+- 失败拆分规则：
 
 目标：
 - <一个清晰目标>
