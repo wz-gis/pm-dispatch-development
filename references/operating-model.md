@@ -189,6 +189,13 @@ last_updated: 2026-07-01
 - worker ID 只有在证据已保存后才能移除。
 - 不删除阻塞记录；已解决阻塞移动到 evidence。
 
+### Worker 可见性规则
+
+- 默认 worker 类型是 `codex-thread`：使用 Codex 可见后台线程分发，让用户能在侧边栏看到并打开。
+- 内部 `sub-agent` 只能在用户明确允许使用 sub-agent、子智能体或内部 worker 时使用。
+- 看板和 `task.yaml.threads` 必须记录 worker ID，并标明 worker 类型，例如 `codex-thread:<thread-id>` 或 `sub-agent:<agent-id>`。
+- 如果旧 worker 是不可见 sub-agent 且用户没有明确授权，应标记 `THREAD_BLOCKED` 或重新分发到可见 Codex 线程。
+
 ## 6. Worker Prompt 模板
 
 ```markdown
@@ -305,8 +312,9 @@ last_updated: 2026-07-01
 3. 创建 `docs/tasks/<TASK>/` 目录。
 4. 定义证据等级和终态。
 5. 定义 PM 线程允许修改哪些仓库。
-6. 定义 worker 是 Codex 线程、子智能体、CI job 还是人。
-7. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
-8. 每个 gate 要求提交文档更新。
-9. 为跨任务承诺增加 regression guard。
-10. 每天清理看板并归档终态任务。
+6. 默认把 worker 分发到 Codex 可见后台线程；只有用户明确授权时才使用内部 sub-agent。
+7. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
+8. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
+9. 每个 gate 要求提交文档更新。
+10. 为跨任务承诺增加 regression guard。
+11. 每天清理看板并归档终态任务。
