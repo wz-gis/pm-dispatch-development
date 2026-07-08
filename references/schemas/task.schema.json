@@ -17,6 +17,7 @@
     "closure",
     "dependencies",
     "resources",
+    "dispatch",
     "runs",
     "last_updated"
   ],
@@ -175,6 +176,26 @@
               "scope": { "type": ["string", "null"] }
             }
           }
+        }
+      }
+    },
+    "dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "reason"],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["direct", "single-worker", "batch-worker", "full-dispatch"]
+        },
+        "reason": { "type": "string" },
+        "worker_required": { "type": "boolean" },
+        "heartbeat_required": { "type": "boolean" },
+        "selected_at": { "type": ["string", "null"] },
+        "max_parallel_workers": { "type": ["integer", "null"] },
+        "escalation_triggers": {
+          "type": "array",
+          "items": { "type": "string" }
         }
       }
     },

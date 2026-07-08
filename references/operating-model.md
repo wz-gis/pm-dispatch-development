@@ -90,6 +90,25 @@ NEW -> TRIAGED -> CONTRACT -> 接入核对 -> READY_FOR_IMPL -> IN_IMPL -> IN_IN
 使用 $pm-dispatch-development 接入一个新工程，创建接入任务、契约任务、实现任务和联调验收任务。
 ```
 
+## 2.1 分发策略
+
+每个任务必须在 `task.yaml.dispatch.strategy` 记录分发策略。策略选择先于 worker 创建，目标是用最轻可验证方式完成任务。
+
+| Strategy | 何时使用 | Worker / Run | Heartbeat |
+| --- | --- | --- | --- |
+| `direct` | 单文件、小修、文案、配置、低风险文档、明确测试的小 bug | 不创建 | 不创建 |
+| `single-worker` | 单工程但需要实现 + L1/L2/L3 验证 | 一个实现+验证 worker | 可选，默认轻量 |
+| `batch-worker` | 2-4 个同工程、同 owner、同 gate、同回归面的任务 | 一个批处理 worker，共享 run | 可选，默认轻量 |
+| `full-dispatch` | 跨工程、DB/release、真实环境、高风险迁移、契约不清 | 契约/实现/联调分 gate | 默认创建 |
+
+选择规则：
+
+- 默认从 `direct` 开始判断；能在当前线程完成且证据可观察，就不要分发 worker。
+- direct 不能取得应测证据、需要 Browser/API/SQL/release 验收或实现上下文过大时，升级为 `single-worker`。
+- 多个相似任务满足合并条件时，用 `batch-worker`，但每个任务仍保留独立 evidence 和 conclusion。
+- 只有跨边界、高风险或必须 PM gate 串行确认时，才用 `full-dispatch`。
+- 策略升级必须更新 `task.yaml.dispatch.reason` 和 `escalation_triggers`；策略降级必须说明为什么不再需要 worker。
+
 ## 3. 证据等级
 
 - `L0`：静态检查、文档核对、契约 grep、schema 检查。
@@ -210,6 +229,16 @@ dependencies:
   graph_checked_at: null
 resources:
   locks: []
+dispatch:
+  strategy: direct
+  reason: Small, low-risk task that can be handled in the PM thread.
+  worker_required: false
+  heartbeat_required: false
+  selected_at: 2026-07-01T00:00:00Z
+  max_parallel_workers: null
+  escalation_triggers:
+    - Requires Browser/API/SQL/release evidence.
+    - Scope crosses owner or repository boundary.
 runs: []
 last_updated: 2026-07-01
 ```
@@ -290,9 +319,10 @@ last_updated: 2026-07-01
 
 分发规则：
 
+- `dispatch.strategy=direct` 时不得创建 active run、attempt、lease 或 heartbeat；只更新 task/evidence/decisions。
 - 同一任务、同一 gate 默认只能有一个 `queued` 或 `running` run，除非 run 显式 `allow_parallel: true` 且资源锁兼容。
 - 分发前必须检查是否已有未过期 lease；有则复用或等待，不得重复分发。
-- heartbeat 看到 worker 仍在运行时，只续租 lease 和汇报状态，不做文档 churn。
+- heartbeat 看到 worker 仍在运行时，默认走轻量巡检：只读 worker 最新状态和必要 lease 字段，续租 lease 和汇报状态，不重读完整 PM 文档，不做文档 churn。
 - lease 到期且 worker 无回应时，把 attempt 标记 `expired`，释放资源锁，再选择重试、返修或 `THREAD_BLOCKED`。
 - worker 完成后，把 attempt 标记 `succeeded`、`failed` 或 `blocked`，写入 commit 和 evidence_ref。
 
@@ -352,10 +382,13 @@ python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py 
 ### 自动巡检规则
 
 - 分发 `codex-thread` worker 后，默认创建或更新 thread heartbeat 自动巡检；只有用户明确说不要轮询时才跳过。
-- 短任务默认频率：每 5 分钟一次，最多 12 次；更长任务可以降低频率或改为人工 checkpoint。
-- 自动巡检必须记录到看板或 evidence：automation ID、目标 worker ID、频率、停止条件。
-- 自动巡检 prompt 必须包含：读取 board/runbook/task/evidence.yaml/evidence.md/decisions/current prompt，读取 worker 线程状态，区分运行中、失联和已完成。
-- worker 仍在运行时：只续租 lease 并中文简短汇报当前进展，不更新其它文档，不提交。
+- 一般任务默认频率：每 15 分钟一次，最多 6 次；只有短任务、P0 紧急验证或用户明确要求高频进度时，才使用每 5 分钟一次、最多 12 次。
+- 自动巡检必须记录到看板或 evidence：automation ID、目标 worker ID、频率、停止条件，以及是否采用轻量巡检。
+- 自动巡检 prompt 必须区分轻量运行中路径和完整收口路径：
+  - 运行中：只读取 worker 线程最新状态；如需确认 lease，只读取 `task.yaml` 的 runs/lease 相关字段。
+  - 完成 / 失败 / 失联 / lease 临期：读取完整 board/runbook/task/evidence.yaml/evidence.md/decisions/current prompt，再做证据回收和 gate 判定。
+- worker 仍在运行时：只续租 lease 并中文简短汇报当前进展，不重读完整 specs / board / evidence / prompt，不更新其它文档，不提交。
+- 如果用户要求在 PM 线程看到进度，运行中的 heartbeat 应使用 `NOTIFY` 简短汇报；否则可以保持安静巡检。
 - worker 失联或 lease 过期时：标记 attempt expired，释放资源锁，再决定重试或 THREAD_BLOCKED。
 - worker 完成时：回收 commit、files、tests、API/SQL/Browser、端口、日志、阻塞和 gate 建议；更新 evidence.yaml、evidence.md、task.yaml、dispatch-board、bug tracker；运行 gate validator 后提交 PM 文档。
 - PM 收口后删除或暂停 heartbeat，避免对已归档任务重复巡检。
@@ -438,12 +471,12 @@ python3 ~/.codex/skills/pm-dispatch-development/scripts/validate_pm_dispatch.py 
 ## 7. 巡检 Heartbeat 模板
 
 ```markdown
-继续 <TASK-ID> 自动调度巡检。
-先读取 board、runbook、task.yaml、evidence.yaml、evidence.md、decisions.md 和当前 prompt。
-读取 worker 线程 <ID> 最新状态。
-如果线程仍在运行且 lease 未过期，只续租 lease 并简短更新状态，不改其它文档。
-如果 lease 已过期或 worker 失联，标记 attempt expired，释放资源锁，并决定重试或 THREAD_BLOCKED。
-如果线程完成，提取 commit/files/tests/API/SQL/Browser/evidence/blockers，
+轻量巡检 <TASK-ID> 的可见 worker。
+默认只读取 worker 线程 <ID> 最新状态；如需确认 lease，仅读取 task.yaml 的 runs/lease 相关字段。
+如果线程仍在运行且 lease 未过期，只简短汇报当前进展，按需续租 lease，不重读完整 PM 文档，不改其它文档，不提交。
+如果 lease 距离过期不足 30 分钟，只更新必要 lease 字段并说明。
+如果 worker 完成、失败、失联或 lease 过期，再读取 board、runbook、task.yaml、evidence.yaml、evidence.md、decisions.md 和当前 prompt。
+完整收口时提取 commit/files/tests/API/SQL/Browser/evidence/blockers，
 更新 evidence.yaml、任务证据、任务状态、看板和 bug tracker，运行 gate validator，并提交 docs。
 收口后删除或暂停本 heartbeat。
 ```
@@ -475,6 +508,7 @@ Validator 失败时只能选择三种动作：补证据、生成返修 prompt、
 实施分发前，如仍有歧义，先问：
 
 - 当前任务是单工程、多工程联调，还是新工程接入？
+- 当前任务能否 direct 完成？如果不能，为什么需要 single-worker、batch-worker 或 full-dispatch？
 - 用户可见验收行为是什么？
 - 哪个仓库拥有修复？
 - 如果是多工程联调，跨工程字段、API、状态和启动顺序是什么？
@@ -504,6 +538,8 @@ Validator 失败时只能选择三种动作：补证据、生成返修 prompt、
 - 不检查 lease 就重复分发同一 gate。
 - 不声明资源锁就并行跑会冲突的 DB、端口、release 或真实账号任务。
 - validator 失败但仍人工标绿。
+- 小型单文件任务默认 full-dispatch，制造无意义 worker / heartbeat / lease 开销。
+- single-worker 足够完成实现和验证时，仍拆成实现 worker + 联调 worker。
 
 ## 11. 跨项目落地清单
 
@@ -514,13 +550,14 @@ Validator 失败时只能选择三种动作：补证据、生成返修 prompt、
 3. 创建 `docs/tasks/<TASK>/` 目录。
 4. 按 schema 创建 `task.yaml` 和 `evidence.yaml`。
 5. 定义证据等级、gate policy 和终态。
-6. 定义 PM 线程允许修改哪些仓库。
-7. 默认把 worker 分发到 Codex 可见后台线程；只有用户明确授权时才使用内部 sub-agent。
-8. 为可见 worker 创建 heartbeat 自动巡检，并记录 automation ID、频率和停止条件。
-9. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
-10. 每次分发写入 Run/Attempt/Lease。
-11. 为并行任务声明 dependencies 和 resources.locks。
-12. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
-13. 每个 gate 要求提交文档更新，并运行 `scripts/validate_pm_dispatch.py`。
-14. 为跨任务承诺增加 regression guard。
-15. 每天清理看板并归档终态任务，收口后删除或暂停对应 heartbeat。
+6. 定义分发策略：`direct`、`single-worker`、`batch-worker`、`full-dispatch`。
+7. 定义 PM 线程允许修改哪些仓库。
+8. 默认把 worker 分发到 Codex 可见后台线程；只有用户明确授权时才使用内部 sub-agent。
+9. 为可见 worker 创建轻量 heartbeat 自动巡检，并记录 automation ID、频率、停止条件和轻量巡检策略。
+10. 定义 worker 是 `codex-thread`、`sub-agent`、`ci-job` 还是 `human`。
+11. 每次 worker 分发写入 Run/Attempt/Lease；direct 任务不得创建 active run。
+12. 为并行任务声明 dependencies 和 resources.locks。
+13. 要求 worker prompt 返回 commit hash、修改文件、命令和阻塞项。
+14. 每个 gate 要求提交文档更新，并运行 `scripts/validate_pm_dispatch.py`。
+15. 为跨任务承诺增加 regression guard。
+16. 每天清理看板并归档终态任务，收口后删除或暂停对应 heartbeat。

@@ -186,6 +186,19 @@ Do not batch:
 
 The default batch size is 2-4 similar tasks. More than 5 tasks requires explicit PM confirmation. If one task fails, split only that task into repair; do not block already verified tasks in the batch.
 
+### 3.3 Dispatch Strategy
+
+Every task records `task.yaml.dispatch.strategy` so the controller uses the lightest verifiable path:
+
+| Strategy | Use |
+| --- | --- |
+| `direct` | Tiny fixes, copy, config, or low-risk single-file work; handle in the current thread without worker/run/heartbeat. |
+| `single-worker` | One project needs implementation + verification; one worker handles both, without a separate integration worker. |
+| `batch-worker` | 2-4 similar tasks share one worker, while evidence and conclusions stay separate. |
+| `full-dispatch` | Cross-project, DB/release, real-environment, or high-risk work that needs explicit PM gates. |
+
+Do not default to full-dispatch. If direct work exposes missing evidence, unclear ownership, or Browser/API/SQL/release requirements, upgrade the strategy.
+
 ### 4. Three Ways To Start
 
 #### 4.1 You Do Not Have A Project Yet
@@ -727,6 +740,16 @@ dependencies:
   graph_checked_at: null
 resources:
   locks: []
+dispatch:
+  strategy: direct
+  reason: "Small, low-risk task that can be handled in the PM thread."
+  worker_required: false
+  heartbeat_required: false
+  selected_at: $(date -u +%FT%TZ)
+  max_parallel_workers: null
+  escalation_triggers:
+    - "Requires Browser/API/SQL/release evidence."
+    - "Scope crosses owner or repository boundary."
 runs: []
 last_updated: $(date +%F)
 EOF

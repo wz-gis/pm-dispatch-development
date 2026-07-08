@@ -152,6 +152,20 @@ def validate_gate_policy(item: LoadedTask, now: datetime) -> tuple[list[str], li
         if len(run_ids) > 1:
             errors.append(f"{prefix}: duplicate active non-parallel runs for gate {gate}: {', '.join(run_ids)}")
 
+    dispatch = task.get("dispatch", {})
+    strategy = dispatch.get("strategy")
+    active_runs = [run for run in task.get("runs", []) if run.get("status") in ACTIVE_RUN_STATUSES]
+    if strategy == "direct" and active_runs:
+        errors.append(f"{prefix}: dispatch.strategy=direct cannot have active worker runs: {ids(active_runs, 'run_id')}")
+    if strategy == "direct" and dispatch.get("worker_required"):
+        errors.append(f"{prefix}: dispatch.strategy=direct requires worker_required=false")
+    if strategy == "direct" and dispatch.get("heartbeat_required"):
+        errors.append(f"{prefix}: dispatch.strategy=direct requires heartbeat_required=false")
+    if strategy == "single-worker" and len(active_runs) > 1:
+        errors.append(f"{prefix}: dispatch.strategy=single-worker allows at most one active run")
+    if strategy in {"single-worker", "batch-worker", "full-dispatch"} and dispatch.get("worker_required") is False:
+        errors.append(f"{prefix}: dispatch.strategy={strategy} requires worker_required=true")
+
     if not evidence:
         return errors, warnings
 
@@ -258,8 +272,8 @@ def matches_any(value: str, needles: list[str]) -> bool:
     return any(needle in value for needle in needles)
 
 
-def ids(items: list[dict[str, Any]]) -> str:
-    return ", ".join(str(item.get("id", "unknown")) for item in items)
+def ids(items: list[dict[str, Any]], key: str = "id") -> str:
+    return ", ".join(str(item.get(key, "unknown")) for item in items)
 
 
 def load_structured_file(path: Path) -> Any:

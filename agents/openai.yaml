@@ -1,4 +1,4 @@
 interface:
   display_name: "PM 调度式开发"
-  short_description: "PM 调度、结构化证据、资源锁与 gate 校验"
-  default_prompt: "使用 $pm-dispatch-development 分诊这个需求，更新 task.yaml/evidence.yaml，检查依赖和资源锁，并用 gate policy 推进验收。"
+  short_description: "按需分发、结构化证据、资源锁与 gate 校验"
+  default_prompt: "使用 $pm-dispatch-development 分诊这个需求，选择 direct/single-worker/full-dispatch，更新 task.yaml/evidence.yaml，并用 gate policy 推进验收。"
