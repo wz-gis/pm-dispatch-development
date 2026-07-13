@@ -1,16 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codex.local/pm-dispatch-development/task.schema.json",
+  "$id": "https://pm-dispatch.local/task.schema.json",
   "title": "PM Dispatch Task",
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "schema_version",
     "id",
+    "display_name",
     "title",
     "type",
     "priority",
     "status",
     "mode",
+    "area",
     "lifecycle",
     "verification",
     "blockers",
@@ -22,10 +25,12 @@
     "last_updated"
   ],
   "properties": {
-    "id": { "type": "string" },
-    "title": { "type": "string" },
-    "type": { "type": "string", "enum": ["bug", "spec", "onboarding", "release", "environment", "chore"] },
-    "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+    "schema_version": {"type": "string", "enum": ["2"]},
+    "id": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"},
+    "display_name": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1},
+    "type": {"type": "string", "enum": ["bug", "spec", "onboarding", "release", "environment", "chore"]},
+    "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
     "status": {
       "type": "string",
       "enum": [
@@ -51,55 +56,31 @@
         "CLOSED"
       ]
     },
-    "mode": { "type": "string", "enum": ["single-project", "multi-project-integration", "new-project-onboarding"] },
-    "area": { "type": "array", "items": { "type": "string" } },
+    "mode": {"type": "string", "enum": ["single-project", "multi-project-integration", "new-project-onboarding"]},
+    "area": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "lifecycle": {
       "type": "object",
       "additionalProperties": false,
       "required": ["phase", "owner", "next_action"],
       "properties": {
-        "phase": {
-          "type": "string",
-          "enum": ["intake", "triage", "contract", "implementation", "integration", "verification", "closure", "archive"]
-        },
-        "owner": { "type": "string" },
-        "accepted_scope": { "type": ["string", "null"] },
-        "next_action": { "type": "string" },
-        "updated_at": { "type": ["string", "null"] }
+        "phase": {"type": "string", "enum": ["intake", "triage", "contract", "implementation", "integration", "verification", "closure", "archive"]},
+        "owner": {"type": "string", "minLength": 1},
+        "accepted_scope": {"type": ["string", "null"]},
+        "next_action": {"type": "string"},
+        "updated_at": {"type": ["string", "null"], "format": "date-time"}
       }
     },
     "verification": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["required_levels", "gate_policy", "evidence_file", "status"],
+      "required": ["required_levels", "gate_policy", "evidence_file", "status", "mock_allowed", "missing"],
       "properties": {
-        "required_levels": {
-          "type": "array",
-          "items": { "type": "string", "enum": ["L0", "L1", "L2", "L3", "L4"] }
-        },
-        "gate_policy": { "type": "string" },
-        "evidence_file": { "type": "string" },
-        "status": {
-          "type": "string",
-          "enum": [
-            "NONE",
-            "PENDING",
-            "L0_VERIFIED",
-            "L1_VERIFIED",
-            "L2_VERIFIED",
-            "L3_VERIFIED",
-            "L4_VERIFIED",
-            "L0_VERIFIED_MOCK",
-            "L1_VERIFIED_MOCK",
-            "L2_VERIFIED_MOCK",
-            "L3_VERIFIED_MOCK",
-            "L4_VERIFIED_MOCK",
-            "PARTIAL",
-            "BLOCKED"
-          ]
-        },
-        "mock_allowed": { "type": "boolean" },
-        "missing": { "type": "array", "items": { "type": "string" } }
+        "required_levels": {"type": "array", "uniqueItems": true, "items": {"type": "string", "enum": ["L0", "L1", "L2", "L3", "L4"]}},
+        "gate_policy": {"type": "string", "minLength": 1},
+        "evidence_file": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "enum": ["NONE", "PENDING", "L0_VERIFIED", "L1_VERIFIED", "L2_VERIFIED", "L3_VERIFIED", "L4_VERIFIED", "L0_VERIFIED_MOCK", "L1_VERIFIED_MOCK", "L2_VERIFIED_MOCK", "L3_VERIFIED_MOCK", "L4_VERIFIED_MOCK", "PARTIAL", "BLOCKED"]},
+        "mock_allowed": {"type": "boolean"},
+        "missing": {"type": "array", "items": {"type": "string"}}
       }
     },
     "blockers": {
@@ -109,14 +90,14 @@
         "additionalProperties": false,
         "required": ["id", "type", "status", "description", "owner"],
         "properties": {
-          "id": { "type": "string" },
-          "type": { "type": "string", "enum": ["environment", "contract", "thread", "pm", "dependency", "resource"] },
-          "status": { "type": "string", "enum": ["open", "resolved", "accepted"] },
-          "description": { "type": "string" },
-          "owner": { "type": "string" },
-          "opened_at": { "type": ["string", "null"] },
-          "resolved_at": { "type": ["string", "null"] },
-          "resolution": { "type": ["string", "null"] }
+          "id": {"type": "string", "minLength": 1},
+          "type": {"type": "string", "enum": ["environment", "contract", "thread", "pm", "dependency", "resource"]},
+          "status": {"type": "string", "enum": ["open", "resolved", "accepted"]},
+          "description": {"type": "string", "minLength": 1},
+          "owner": {"type": "string", "minLength": 1},
+          "opened_at": {"type": ["string", "null"], "format": "date-time"},
+          "resolved_at": {"type": ["string", "null"], "format": "date-time"},
+          "resolution": {"type": ["string", "null"]}
         }
       }
     },
@@ -125,34 +106,36 @@
       "additionalProperties": false,
       "required": ["status"],
       "properties": {
-        "status": { "type": "string", "enum": ["open", "ready", "closed"] },
-        "accepted_by": { "type": ["string", "null"] },
-        "accepted_at": { "type": ["string", "null"] },
-        "closed_at": { "type": ["string", "null"] },
-        "archived_to": { "type": ["string", "null"] },
-        "notes": { "type": ["string", "null"] }
+        "status": {"type": "string", "enum": ["open", "ready", "closed"]},
+        "accepted_by": {"type": ["string", "null"]},
+        "accepted_at": {"type": ["string", "null"], "format": "date-time"},
+        "closed_at": {"type": ["string", "null"], "format": "date-time"},
+        "archived_to": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"]}
       }
     },
     "dependencies": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["requires", "blocks"],
+      "required": ["requires", "blocks", "graph_checked_at"],
       "properties": {
         "requires": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["task_id", "required_status"],
+            "required": ["task_id", "required_status", "source", "evidence_ref"],
             "properties": {
-              "task_id": { "type": "string" },
-              "required_status": { "type": "string" },
-              "status": { "type": ["string", "null"] }
+              "task_id": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"},
+              "required_status": {"type": "string", "minLength": 1},
+              "source": {"type": "string", "enum": ["board", "external"]},
+              "status": {"type": ["string", "null"]},
+              "evidence_ref": {"type": ["string", "null"]}
             }
           }
         },
-        "blocks": { "type": "array", "items": { "type": "string" } },
-        "graph_checked_at": { "type": ["string", "null"] }
+        "blocks": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"}},
+        "graph_checked_at": {"type": ["string", "null"], "format": "date-time"}
       }
     },
     "resources": {
@@ -165,15 +148,15 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["resource_id", "mode", "holder_run_id", "status"],
+            "required": ["resource_id", "mode", "holder_run_id", "status", "lease_expires_at", "scope"],
             "properties": {
-              "resource_id": { "type": "string" },
-              "type": { "type": "string" },
-              "mode": { "type": "string", "enum": ["shared", "exclusive"] },
-              "holder_run_id": { "type": "string" },
-              "status": { "type": "string", "enum": ["active", "released", "expired"] },
-              "lease_expires_at": { "type": ["string", "null"] },
-              "scope": { "type": ["string", "null"] }
+              "resource_id": {"type": "string", "minLength": 1},
+              "type": {"type": ["string", "null"]},
+              "mode": {"type": "string", "enum": ["shared", "exclusive"]},
+              "holder_run_id": {"type": "string", "minLength": 1},
+              "status": {"type": "string", "enum": ["active", "released", "expired"]},
+              "lease_expires_at": {"type": ["string", "null"], "format": "date-time"},
+              "scope": {"type": "string", "minLength": 1}
             }
           }
         }
@@ -182,21 +165,111 @@
     "dispatch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["strategy", "reason"],
+      "required": ["strategy", "provider_policy", "required_capabilities", "required_evidence_kinds", "reason", "worker_required", "heartbeat_required", "selected_at", "max_parallel_workers", "model_request", "fallback_policy", "resolution", "batch", "heartbeat", "escalation_triggers"],
       "properties": {
-        "strategy": {
-          "type": "string",
-          "enum": ["direct", "single-worker", "batch-worker", "full-dispatch"]
+        "strategy": {"type": "string", "enum": ["direct", "single-worker", "batch-worker", "full-dispatch"]},
+        "provider_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "provider"],
+          "properties": {
+            "mode": {"type": "string", "enum": ["local", "auto", "pinned"]},
+            "provider": {"type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]*$"}
+          }
         },
-        "reason": { "type": "string" },
-        "worker_required": { "type": "boolean" },
-        "heartbeat_required": { "type": "boolean" },
-        "selected_at": { "type": ["string", "null"] },
-        "max_parallel_workers": { "type": ["integer", "null"] },
-        "escalation_triggers": {
+        "required_capabilities": {
           "type": "array",
-          "items": { "type": "string" }
-        }
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+        },
+        "required_evidence_kinds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"}
+        },
+        "reason": {"type": "string", "minLength": 1},
+        "worker_required": {"type": "boolean"},
+        "heartbeat_required": {"type": "boolean"},
+        "selected_at": {"type": ["string", "null"], "format": "date-time"},
+        "max_parallel_workers": {"type": ["integer", "null"], "minimum": 1},
+        "model_request": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["quality", "reasoning_profile", "latency", "cost"],
+          "properties": {
+            "quality": {"type": "string", "enum": ["any", "fast", "balanced", "frontier"]},
+            "reasoning_profile": {"type": "string", "enum": ["fast", "standard", "deep", "critical"]},
+            "latency": {"type": "string", "enum": ["low", "normal", "relaxed"]},
+            "cost": {"type": "string", "enum": ["economical", "balanced", "unbounded"]}
+          }
+        },
+        "fallback_policy": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["mode", "allowed_providers", "allow_model_substitution", "allow_manual_monitoring"],
+          "properties": {
+            "mode": {"type": "string", "enum": ["strict", "compatible"]},
+            "allowed_providers": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+            },
+            "allow_model_substitution": {"type": "boolean"},
+            "allow_manual_monitoring": {"type": "boolean"}
+          }
+        },
+        "resolution": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["provider", "adapter_version", "model_id", "reasoning_profile", "provider_reasoning_effort", "worker_type", "monitor_mode", "capabilities", "evidence_kinds", "resolved_at", "reason"],
+          "properties": {
+            "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+            "adapter_version": {"type": "string", "pattern": "^[0-9]+$"},
+            "model_id": {"type": "string", "minLength": 1},
+            "reasoning_profile": {"type": "string", "enum": ["fast", "standard", "deep", "critical"]},
+            "provider_reasoning_effort": {"type": "string", "minLength": 1},
+            "worker_type": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+            "monitor_mode": {"type": "string", "enum": ["heartbeat", "poll", "manual"]},
+            "capabilities": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+            },
+            "evidence_kinds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"}
+            },
+            "resolved_at": {"type": "string", "format": "date-time"},
+            "reason": {"type": "string", "minLength": 1}
+          }
+        },
+        "batch": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["batch_id", "display_name", "task_ids"],
+          "properties": {
+            "batch_id": {"type": "string", "pattern": "^BATCH-[A-Z0-9]+(-[A-Z0-9]+)*$"},
+            "display_name": {"type": "string", "minLength": 1},
+            "task_ids": {"type": "array", "minItems": 2, "maxItems": 4, "uniqueItems": true, "items": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"}}
+          }
+        },
+        "heartbeat": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["automation_id", "interval_minutes", "max_checks", "stop_condition", "lightweight", "status"],
+          "properties": {
+            "automation_id": {"type": "string", "minLength": 1},
+            "interval_minutes": {"type": "integer", "minimum": 1},
+            "max_checks": {"type": "integer", "minimum": 1},
+            "stop_condition": {"type": "string", "minLength": 1},
+            "lightweight": {"type": "boolean"},
+            "status": {"type": "string", "enum": ["active", "paused", "stopped"]}
+          }
+        },
+        "escalation_triggers": {"type": "array", "items": {"type": "string"}}
       }
     },
     "runs": {
@@ -204,48 +277,57 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["run_id", "gate", "worker_type", "status", "attempts"],
+        "required": ["run_id", "gate", "worker_type", "worker_name", "worker_label", "worker_id", "provider", "adapter_version", "model_id", "reasoning_profile", "provider_reasoning_effort", "resolution_reason", "status", "allow_parallel", "started_at", "finished_at", "attempts"],
         "properties": {
-          "run_id": { "type": "string" },
-          "gate": { "type": "string", "enum": ["contract", "implementation", "integration", "verification", "closure"] },
-          "worker_type": { "type": "string", "enum": ["codex-thread", "sub-agent", "ci-job", "human"] },
-          "worker_id": { "type": ["string", "null"] },
-          "status": { "type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"] },
-          "allow_parallel": { "type": "boolean" },
-          "started_at": { "type": ["string", "null"] },
-          "finished_at": { "type": ["string", "null"] },
+          "run_id": {"type": "string", "pattern": "^run-(?:(?:BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}|BATCH-[A-Z0-9]+(-[A-Z0-9]+)*)-(contract|impl|integration|verify|closure)-w[0-9]{2}$"},
+          "gate": {"type": "string", "enum": ["contract", "implementation", "integration", "verification", "closure"]},
+          "worker_type": {"type": "string", "enum": ["codex-thread", "agent-thread", "sub-agent", "ci-job", "human"]},
+          "worker_name": {"type": "string", "pattern": "^(?:(?:BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}|BATCH-[A-Z0-9]+(-[A-Z0-9]+)*)-(contract|impl|integration|verify|closure)-w[0-9]{2}$"},
+          "worker_label": {"type": "string", "minLength": 1},
+          "worker_id": {"type": ["string", "null"]},
+          "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+          "adapter_version": {"type": "string", "pattern": "^[0-9]+$"},
+          "model_id": {"type": "string", "minLength": 1},
+          "reasoning_profile": {"type": "string", "enum": ["fast", "standard", "deep", "critical"]},
+          "provider_reasoning_effort": {"type": "string", "minLength": 1},
+          "resolution_reason": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]},
+          "allow_parallel": {"type": "boolean"},
+          "started_at": {"type": ["string", "null"], "format": "date-time"},
+          "finished_at": {"type": ["string", "null"], "format": "date-time"},
           "attempts": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
               "additionalProperties": false,
               "required": ["attempt_id", "status"],
               "properties": {
-                "attempt_id": { "type": "string" },
-                "status": { "type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"] },
-                "started_at": { "type": ["string", "null"] },
-                "finished_at": { "type": ["string", "null"] },
-                "prompt_file": { "type": ["string", "null"] },
-                "commit": { "type": ["string", "null"] },
+                "attempt_id": {"type": "string", "pattern": "^attempt-(?:(?:BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}|BATCH-[A-Z0-9]+(-[A-Z0-9]+)*)-(contract|impl|integration|verify|closure)-w[0-9]{2}-a[0-9]{2}$"},
+                "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]},
+                "started_at": {"type": ["string", "null"], "format": "date-time"},
+                "finished_at": {"type": ["string", "null"], "format": "date-time"},
+                "prompt_file": {"type": ["string", "null"]},
+                "commit": {"type": ["string", "null"]},
                 "lease": {
                   "type": ["object", "null"],
                   "additionalProperties": false,
-                  "required": ["holder", "acquired_at", "expires_at"],
+                  "required": ["holder", "acquired_at", "expires_at", "renew_count"],
                   "properties": {
-                    "holder": { "type": "string" },
-                    "acquired_at": { "type": "string" },
-                    "heartbeat_at": { "type": ["string", "null"] },
-                    "expires_at": { "type": "string" },
-                    "renew_count": { "type": "integer" }
+                    "holder": {"type": "string", "minLength": 1},
+                    "acquired_at": {"type": "string", "format": "date-time"},
+                    "heartbeat_at": {"type": ["string", "null"], "format": "date-time"},
+                    "expires_at": {"type": "string", "format": "date-time"},
+                    "renew_count": {"type": "integer", "minimum": 0}
                   }
                 },
-                "evidence_ref": { "type": ["string", "null"] }
+                "evidence_ref": {"type": ["string", "null"]}
               }
             }
           }
         }
       }
     },
-    "last_updated": { "type": "string" }
+    "last_updated": {"type": "string", "format": "date-time"}
   }
 }

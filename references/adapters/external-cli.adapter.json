@@ -1,0 +1,49 @@
+{
+  "schema_version": "1",
+  "adapter_version": "1",
+  "provider": "external-cli",
+  "worker_types": ["agent-thread"],
+  "capabilities": [
+    "api",
+    "background-worker",
+    "code-edit",
+    "git",
+    "shell",
+    "sql"
+  ],
+  "components": {
+    "worker": {
+      "create": "agent start",
+      "inspect": "agent status",
+      "cancel": "agent cancel",
+      "supports_background": true
+    },
+    "model": {
+      "default_model": "external-frontier",
+      "fallback_models": []
+    },
+    "monitor": {
+      "modes": ["poll", "manual"],
+      "supports_lease_renewal": false
+    },
+    "evidence": {
+      "artifact_kinds": ["api", "command", "id", "log", "sql"],
+      "sources": ["external-agent", "git", "shell"]
+    }
+  },
+  "models": [
+    {
+      "id": "external-frontier",
+      "aliases": [],
+      "quality": "frontier",
+      "latency_class": "normal",
+      "cost_class": "balanced",
+      "reasoning_profiles": {
+        "fast": "quick",
+        "standard": "normal",
+        "deep": "deliberate",
+        "critical": "maximum"
+      }
+    }
+  ]
+}
