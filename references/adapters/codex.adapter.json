@@ -1,0 +1,61 @@
+{
+  "schema_version": "1",
+  "adapter_version": "1",
+  "provider": "codex",
+  "worker_types": ["codex-thread"],
+  "capabilities": [
+    "api",
+    "background-worker",
+    "browser",
+    "code-edit",
+    "git",
+    "heartbeat",
+    "shell",
+    "sql"
+  ],
+  "components": {
+    "worker": {
+      "create": "create_thread",
+      "inspect": "read_thread",
+      "cancel": "set_thread_archived",
+      "supports_background": true
+    },
+    "model": {
+      "default_model": "gpt-5.6-sol",
+      "fallback_models": []
+    },
+    "monitor": {
+      "modes": ["heartbeat", "manual"],
+      "supports_lease_renewal": true
+    },
+    "evidence": {
+      "artifact_kinds": [
+        "api",
+        "browser",
+        "command",
+        "id",
+        "log",
+        "release_path",
+        "screenshot",
+        "sql",
+        "upgrade_path"
+      ],
+      "sources": ["automation", "codex-browser", "git", "shell"]
+    }
+  },
+  "models": [
+    {
+      "id": "gpt-5.6-sol",
+      "aliases": ["5.6 sol"],
+      "quality": "frontier",
+      "latency_class": "normal",
+      "cost_class": "balanced",
+      "reasoning_profiles": {
+        "fast": "low",
+        "standard": "medium",
+        "deep": "high",
+        "critical": "xhigh"
+      }
+    }
+  ]
+}

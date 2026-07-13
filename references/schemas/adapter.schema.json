@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pm-dispatch.local/adapter.schema.json",
+  "title": "PM Dispatch Provider Adapter",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "adapter_version",
+    "provider",
+    "worker_types",
+    "capabilities",
+    "components",
+    "models"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1"]},
+    "adapter_version": {"type": "string", "pattern": "^[0-9]+$"},
+    "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+    "worker_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker", "model", "monitor", "evidence"],
+      "properties": {
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["create", "inspect", "cancel", "supports_background"],
+          "properties": {
+            "create": {"type": "string", "minLength": 1},
+            "inspect": {"type": "string", "minLength": 1},
+            "cancel": {"type": "string", "minLength": 1},
+            "supports_background": {"type": "boolean"}
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["default_model", "fallback_models"],
+          "properties": {
+            "default_model": {"type": "string", "minLength": 1},
+            "fallback_models": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "monitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["modes", "supports_lease_renewal"],
+          "properties": {
+            "modes": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "enum": ["heartbeat", "poll", "manual"]}
+            },
+            "supports_lease_renewal": {"type": "boolean"}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_kinds", "sources"],
+          "properties": {
+            "artifact_kinds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"}
+            },
+            "sources": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "aliases", "quality", "latency_class", "cost_class", "reasoning_profiles"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "aliases": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "quality": {"type": "string", "enum": ["fast", "balanced", "frontier"]},
+          "latency_class": {"type": "string", "enum": ["low", "normal", "high"]},
+          "cost_class": {"type": "string", "enum": ["economical", "balanced", "premium"]},
+          "reasoning_profiles": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fast", "standard", "deep", "critical"],
+            "properties": {
+              "fast": {"type": "string", "minLength": 1},
+              "standard": {"type": "string", "minLength": 1},
+              "deep": {"type": "string", "minLength": 1},
+              "critical": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
+  }
+}
