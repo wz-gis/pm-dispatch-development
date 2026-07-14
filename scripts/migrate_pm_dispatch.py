@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +19,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from validate_pm_dispatch import load_structured_file  # noqa: E402
+from validate_pm_dispatch import (  # noqa: E402
+    assert_supported_schema,
+    load_adapters,
+    load_structured_file,
+    parse_time,
+    validate_adapter_resolution,
+    validate_schema,
+)
 
 
 LEGACY_ID_RE = re.compile(
@@ -62,6 +71,10 @@ ARTIFACT_GROUPS = [
 ]
 
 
+class MigrationError(ValueError):
+    """Raised before source files are changed when migration cannot be proven safe."""
+
+
 def normalize_task_id(value: Any) -> str:
     text = str(value or "")
     if re.fullmatch(r"(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-\d{3}", text):
@@ -103,7 +116,9 @@ def migrate_task(
         )
     else:
         provider = str(old_provider or (dispatch.get("resolution") or {}).get("provider") or "codex")
-        adapter = adapters.get(provider, {})
+        adapter = adapters.get(provider)
+        if not adapter:
+            raise MigrationError(f"worker task uses unknown provider {provider!r}")
         policy = old_policy or {}
         profile = PROFILE_BY_DIFFICULTY.get(policy.get("difficulty"), "standard")
         component_model = adapter.get("components", {}).get("model", {})
@@ -271,43 +286,69 @@ def migrate_evidence(source: dict[str, Any], now: str) -> dict[str, Any]:
 
 
 def migrate_artifact(group: str, item: Any, index: int, captured_at: str) -> dict[str, Any]:
-    if isinstance(item, dict):
-        return item
+    existing = item if isinstance(item, dict) else {}
     slug = group.rstrip("s").replace("_", "-")
-    artifact_id = f"legacy-{slug}-{index:03d}"
+    generated_id = f"legacy-{slug}-{index:03d}"
+    candidate_id = str(existing.get("artifact_id") or "")
+    artifact_id = (
+        candidate_id
+        if re.fullmatch(r"[a-z][a-z0-9-]*", candidate_id)
+        else generated_id
+    )
+    subject = str(existing.get("subject") or item or "legacy artifact")
+    source = str(existing.get("source") or "legacy-migration")
+    evidence_ref = str(existing.get("evidence_ref") or f"legacy/{artifact_id}.txt")
+    artifact_time = str(existing.get("captured_at") or captured_at)
+    try:
+        parse_time(artifact_time)
+    except (TypeError, ValueError):
+        artifact_time = captured_at
+    complete = isinstance(item, dict) and all(
+        existing.get(key)
+        for key in ("artifact_id", "kind", "source", "subject", "result", "captured_at", "evidence_ref")
+    )
+    result = existing.get("result") if complete else "info"
+    if result not in {"pass", "fail", "info"}:
+        result = "info"
     if group == "commands":
+        command = str(existing.get("command") or item or "legacy command")
+        exit_code = existing.get("exit_code")
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+            exit_code = -1
+            result = "info"
+        if result == "pass" and exit_code != 0:
+            result = "info"
         return {
             "artifact_id": artifact_id,
             "kind": "command",
-            "source": "legacy-migration",
-            "subject": str(item),
-            "result": "info",
-            "captured_at": captured_at,
-            "evidence_ref": f"legacy/{artifact_id}.txt",
-            "command": str(item),
-            "exit_code": -1,
+            "source": source,
+            "subject": subject,
+            "result": result,
+            "captured_at": artifact_time,
+            "evidence_ref": evidence_ref,
+            "command": command,
+            "exit_code": exit_code,
         }
     artifact = {
         "artifact_id": artifact_id,
         "kind": ARTIFACT_KIND_BY_GROUP[group],
-        "source": "legacy-migration",
-        "subject": str(item),
-        "result": "info",
-        "captured_at": captured_at,
-        "evidence_ref": f"legacy/{artifact_id}.txt",
+        "source": source,
+        "subject": subject,
+        "result": result,
+        "captured_at": artifact_time,
+        "evidence_ref": evidence_ref,
     }
-    if group == "api":
-        artifact["status_code"] = 0
+    if "status_code" in existing and (
+        existing["status_code"] is None or isinstance(existing["status_code"], int)
+    ):
+        artifact["status_code"] = existing["status_code"]
+    if "digest" in existing and (
+        existing["digest"] is None or isinstance(existing["digest"], str)
+    ):
+        artifact["digest"] = existing["digest"]
+    if group == "api" and result == "pass" and artifact.get("status_code") is None:
+        artifact["result"] = "info"
     return artifact
-
-
-def load_adapter_catalog(adapter_dir: Path) -> dict[str, dict[str, Any]]:
-    result = {}
-    for path in sorted(adapter_dir.glob("*.adapter.json")):
-        adapter = load_structured_file(path)
-        if adapter.get("provider"):
-            result[str(adapter["provider"])] = adapter
-    return result
 
 
 def collect_paths(inputs: list[str]) -> list[Path]:
@@ -322,6 +363,36 @@ def collect_paths(inputs: list[str]) -> list[Path]:
     return paths
 
 
+def validate_migrated_document(
+    document: dict[str, Any],
+    document_type: str,
+    task_schema: dict[str, Any],
+    evidence_schema: dict[str, Any],
+    adapters: dict[str, dict[str, Any]],
+    prefix: str,
+) -> list[str]:
+    schema = task_schema if document_type == "task" else evidence_schema
+    errors = validate_schema(document, schema, prefix, schema)
+    if document_type == "task" and not errors and document.get("dispatch", {}).get("resolution"):
+        validate_adapter_resolution(document, adapters, errors, prefix)
+    return errors
+
+
+def atomic_write_with_backup(path: Path, rendered: str) -> Path:
+    backup = path.with_suffix(path.suffix + ".v1.bak")
+    if backup.exists():
+        raise MigrationError(f"backup already exists: {backup}")
+    temporary = path.with_name(f".{path.name}.migrating")
+    shutil.copy2(path, backup)
+    try:
+        temporary.write_text(rendered, encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return backup
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Migrate PM dispatch documents to schema v2.")
     parser.add_argument("paths", nargs="+", help="Task/Evidence files or a docs/tasks directory")
@@ -332,23 +403,56 @@ def main() -> int:
 
     root = SCRIPT_DIR.parent
     adapter_dir = Path(args.adapter_dir).resolve() if args.adapter_dir else root / "references" / "adapters"
-    adapter_catalog = load_adapter_catalog(adapter_dir)
+    schema_dir = root / "references" / "schemas"
+    task_schema = load_structured_file(schema_dir / "task.schema.json")
+    evidence_schema = load_structured_file(schema_dir / "evidence.schema.json")
+    adapter_schema = load_structured_file(schema_dir / "adapter.schema.json")
+    for name, schema in (
+        ("task.schema.json", task_schema),
+        ("evidence.schema.json", evidence_schema),
+        ("adapter.schema.json", adapter_schema),
+    ):
+        assert_supported_schema(schema, name)
+    adapter_catalog, adapter_errors = load_adapters(adapter_dir, adapter_schema)
+    if adapter_errors:
+        raise MigrationError("invalid adapter catalog: " + "; ".join(adapter_errors))
     now = args.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    pending: list[tuple[Path, dict[str, Any], str, str, bool]] = []
     for path in collect_paths(args.paths):
         document = load_structured_file(path)
         if "dispatch" in document or "id" in document:
             migrated = migrate_task(document, adapter_catalog, now)
+            document_type = "task"
         elif "task_id" in document:
             migrated = migrate_evidence(document, now)
+            document_type = "evidence"
         else:
-            raise ValueError(f"{path}: cannot determine Task or Evidence document type")
+            raise MigrationError(f"{path}: cannot determine Task or Evidence document type")
+        migration_errors = validate_migrated_document(
+            migrated,
+            document_type,
+            task_schema,
+            evidence_schema,
+            adapter_catalog,
+            str(path),
+        )
+        if migration_errors:
+            raise MigrationError("migrated output is invalid: " + "; ".join(migration_errors))
         rendered = json.dumps(migrated, ensure_ascii=False, indent=2) + "\n"
-        if args.write:
-            path.write_text(rendered, encoding="utf-8")
-            print(f"migrated {path}")
-        else:
+        pending.append((path, migrated, rendered, document_type, migrated != document))
+
+    if not args.write:
+        for path, _, rendered, _, _ in pending:
             print(f"--- {path}")
             print(rendered, end="")
+        return 0
+
+    for path, _, rendered, _, changed in pending:
+        if not changed:
+            print(f"unchanged {path}")
+            continue
+        backup = atomic_write_with_backup(path, rendered)
+        print(f"migrated {path} (backup: {backup})")
     return 0
 
 

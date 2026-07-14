@@ -11,6 +11,7 @@
 - Browser/API/SQL 等证据使用结构化 Artifact，不接受任意字符串占位。
 - Validator 检查状态矩阵、并发上限、Heartbeat、Run/Attempt/Lease、依赖环和资源锁。
 - 核心协议平台无关；Resolver 根据能力和通用模型请求选择 Adapter，实际参数写入 Resolution。
+- Adapter protocol v1 将 Worker transport、输入、超时和输出路径变成机器契约。
 - Task/Evidence 使用 Schema v2，旧文档可通过迁移脚本升级。
 
 ## 安装
@@ -99,6 +100,12 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks
 python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 ```
 
+写回前会验证完整 v2 输出，原文件保存为 `.v1.bak`，再通过原子替换更新。任务面板使用确定性状态映射和快照测试：
+
+```bash
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks
+```
+
 ## 文件职责
 
 - `SKILL.md`：触发后的操作顺序和按需读取路由。
@@ -109,7 +116,9 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 - `references/schemas/`：正式数据结构。
 - `scripts/validate_pm_dispatch.py`：Gate、依赖图和资源锁校验。
 - `scripts/resolve_pm_dispatch.py`：能力、模型和回退策略解析。
+- `scripts/adapter_protocol.py`：构建 Worker 操作 envelope 并解析 Provider 结果。
 - `scripts/migrate_pm_dispatch.py`：旧格式到 Schema v2 的保守迁移。
+- `scripts/render_task_panel.py`：固定五列任务面板渲染。
 - `tests/`：契约、Resolver、迁移和 Gate 持久回归测试。
 
 机器事实源是 Schema、Adapter JSON 和 validator。README 不重新定义字段。

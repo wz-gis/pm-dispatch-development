@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,9 +36,14 @@ class AdapterContractCase(unittest.TestCase):
     def test_adapter_declares_four_component_contracts(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
         self.assertEqual(set(adapter["components"]), {"worker", "model", "monitor", "evidence"})
-        self.assertTrue(adapter["components"]["worker"]["create"])
-        self.assertTrue(adapter["components"]["worker"]["inspect"])
-        self.assertTrue(adapter["components"]["worker"]["cancel"])
+        worker = adapter["components"]["worker"]
+        self.assertEqual(adapter["protocol_version"], "1")
+        self.assertIn(worker["transport"], {"tool", "command", "api", "manual"})
+        for operation in ("create", "inspect", "cancel"):
+            self.assertTrue(worker[operation]["target"])
+            self.assertTrue(worker[operation]["input_fields"])
+            self.assertTrue(worker[operation]["status_path"])
+        self.assertTrue(worker["create"]["worker_id_path"])
 
     def test_adapter_maps_every_core_reasoning_profile(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
@@ -49,6 +55,32 @@ class AdapterContractCase(unittest.TestCase):
         adapter.pop("adapter_version", None)
         errors = validator.validate_schema(adapter, self.schema, "adapter", self.schema)
         self.assertTrue(any("adapter_version" in error for error in errors))
+
+    def test_adapter_integrity_rejects_unknown_default_and_duplicate_models(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["components"]["model"]["default_model"] = "missing-model"
+        adapter["models"].append(dict(adapter["models"][0]))
+        errors = validator.validate_adapter_integrity(adapter, "adapter")
+        self.assertTrue(any("default_model" in error for error in errors))
+        self.assertTrue(any("duplicate model id" in error for error in errors))
+
+    def test_specialized_model_may_support_subset_of_reasoning_profiles(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["models"][0]["reasoning_profiles"] = {"fast": "low", "standard": "medium"}
+        errors = validator.validate_schema(adapter, self.schema, "adapter", self.schema)
+        self.assertEqual(errors, [])
+
+    def test_malformed_adapter_stops_after_schema_validation(self) -> None:
+        malformed = json.loads(
+            (ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8")
+        )
+        malformed["models"] = ["not-an-object"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "malformed.adapter.json"
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            adapters, errors = validator.load_adapters(Path(tmp), self.schema)
+        self.assertEqual(adapters, {})
+        self.assertTrue(any("expected object" in error for error in errors))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 {
   "schema_version": "1",
+  "protocol_version": "1",
   "adapter_version": "1",
   "provider": "codex",
   "worker_types": ["codex-thread"],
@@ -15,9 +16,28 @@
   ],
   "components": {
     "worker": {
-      "create": "create_thread",
-      "inspect": "read_thread",
-      "cancel": "set_thread_archived",
+      "transport": "tool",
+      "create": {
+        "target": "create_thread",
+        "input_fields": ["title", "prompt"],
+        "worker_id_path": "$.threadId",
+        "status_path": "$.status",
+        "timeout_seconds": 120
+      },
+      "inspect": {
+        "target": "read_thread",
+        "input_fields": ["worker_id"],
+        "worker_id_path": "$.threadId",
+        "status_path": "$.status",
+        "timeout_seconds": 30
+      },
+      "cancel": {
+        "target": "set_thread_archived",
+        "input_fields": ["worker_id"],
+        "worker_id_path": "$.threadId",
+        "status_path": "$.status",
+        "timeout_seconds": 30
+      },
       "supports_background": true
     },
     "model": {

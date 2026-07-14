@@ -1,5 +1,6 @@
 {
   "schema_version": "1",
+  "protocol_version": "1",
   "adapter_version": "1",
   "provider": "external-cli",
   "worker_types": ["agent-thread"],
@@ -13,9 +14,28 @@
   ],
   "components": {
     "worker": {
-      "create": "agent start",
-      "inspect": "agent status",
-      "cancel": "agent cancel",
+      "transport": "command",
+      "create": {
+        "target": "agent start --json",
+        "input_fields": ["title", "prompt"],
+        "worker_id_path": "$.worker_id",
+        "status_path": "$.status",
+        "timeout_seconds": 120
+      },
+      "inspect": {
+        "target": "agent status --json",
+        "input_fields": ["worker_id"],
+        "worker_id_path": "$.worker_id",
+        "status_path": "$.status",
+        "timeout_seconds": 30
+      },
+      "cancel": {
+        "target": "agent cancel --json",
+        "input_fields": ["worker_id"],
+        "worker_id_path": "$.worker_id",
+        "status_path": "$.status",
+        "timeout_seconds": 30
+      },
       "supports_background": true
     },
     "model": {

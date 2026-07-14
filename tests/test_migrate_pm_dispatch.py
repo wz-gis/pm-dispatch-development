@@ -3,13 +3,16 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATOR_PATH = ROOT / "scripts" / "migrate_pm_dispatch.py"
+EVIDENCE_SCHEMA_PATH = ROOT / "references" / "schemas" / "evidence.schema.json"
 NOW = "2026-07-13T12:00:00Z"
 
 
@@ -132,6 +135,78 @@ class MigratorCase(unittest.TestCase):
         once = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
         twice = self.migrator.migrate_task(copy.deepcopy(once), self.adapters, NOW)
         self.assertEqual(twice, once)
+
+    def test_partial_dict_artifact_is_normalized_to_v2_schema(self) -> None:
+        evidence = {
+            "task_id": "bug001-env-block",
+            "generated_at": NOW,
+            "artifacts": {"browser": [{"kind": "browser", "subject": "partial"}]},
+        }
+        migrated = self.migrator.migrate_evidence(evidence, NOW)
+        browser = migrated["artifacts"]["browser"][0]
+        self.assertEqual(browser["result"], "info")
+        schema = json.loads(EVIDENCE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        errors = self.migrator.validate_schema(migrated, schema, "evidence", schema)
+        self.assertEqual(errors, [])
+
+    def test_unknown_worker_provider_fails_instead_of_guessing_adapter(self) -> None:
+        task = legacy_worker_task()
+        task["dispatch"]["provider"] = "missing-provider"
+        with self.assertRaisesRegex(self.migrator.MigrationError, "missing-provider"):
+            self.migrator.migrate_task(task, self.adapters, NOW)
+
+    def test_write_validates_first_and_creates_backup_atomically(self) -> None:
+        evidence = {
+            "task_id": "bug001-env-block",
+            "generated_at": NOW,
+            "artifacts": {"browser": ["legacy browser claim"]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.yaml"
+            original = json.dumps(evidence, ensure_ascii=False)
+            path.write_text(original, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(MIGRATOR_PATH),
+                    str(path),
+                    "--now",
+                    NOW,
+                    "--write",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            backup = path.with_suffix(".yaml.v1.bak")
+            self.assertEqual(backup.read_text(encoding="utf-8"), original)
+            migrated = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated["schema_version"], "2")
+
+    def test_invalid_migration_does_not_overwrite_source(self) -> None:
+        task = legacy_worker_task()
+        task.pop("title")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.yaml"
+            original = json.dumps(task, ensure_ascii=False)
+            path.write_text(original, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(MIGRATOR_PATH),
+                    str(path),
+                    "--now",
+                    NOW,
+                    "--write",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertFalse(path.with_suffix(".yaml.v1.bak").exists())
 
 
 if __name__ == "__main__":

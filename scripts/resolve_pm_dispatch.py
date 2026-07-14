@@ -44,6 +44,10 @@ def resolve_dispatch(
 
     if dispatch.get("strategy") == "direct":
         raise ResolutionError("direct dispatch does not require a provider resolution")
+    if not dispatch.get("required_capabilities"):
+        raise ResolutionError("worker dispatch requires at least one required_capabilities entry")
+    if not dispatch.get("required_evidence_kinds"):
+        raise ResolutionError("worker dispatch requires at least one required_evidence_kinds entry")
     if fallback_mode == "strict" and policy_mode != "pinned":
         raise ResolutionError("strict fallback requires a pinned provider")
 

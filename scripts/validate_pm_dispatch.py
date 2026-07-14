@@ -164,9 +164,12 @@ def main() -> int:
         task_path = task_path.resolve()
         try:
             task = load_structured_file(task_path)
-            errors.extend(validate_schema(task, task_schema, f"{task_path}", task_schema))
+            task_schema_errors = validate_schema(task, task_schema, f"{task_path}", task_schema)
+            errors.extend(task_schema_errors)
         except Exception as exc:
             errors.append(f"{task_path}: cannot load task: {exc}")
+            continue
+        if task_schema_errors:
             continue
 
         evidence_path = evidence_file_for(task_path, task, args.evidence if len(task_paths) == 1 else None)
@@ -174,7 +177,12 @@ def main() -> int:
         if evidence_path.exists():
             try:
                 evidence = load_structured_file(evidence_path)
-                errors.extend(validate_schema(evidence, evidence_schema, f"{evidence_path}", evidence_schema))
+                evidence_schema_errors = validate_schema(
+                    evidence, evidence_schema, f"{evidence_path}", evidence_schema
+                )
+                errors.extend(evidence_schema_errors)
+                if evidence_schema_errors:
+                    evidence = None
             except Exception as exc:
                 errors.append(f"{evidence_path}: cannot load evidence: {exc}")
         elif task.get("status") in EVIDENCE_REQUIRED_STATUSES:
@@ -426,6 +434,10 @@ def validate_gate_policy(
         elif strategy in {"single-worker", "full-dispatch"} and not worker_name.startswith(f"{task_id}-"):
             errors.append(f"{prefix}: dispatch.strategy={strategy} requires worker_name to start with task id {task_id!r}, got {worker_name!r}")
     if strategy in {"single-worker", "batch-worker", "full-dispatch"}:
+        if not dispatch.get("required_capabilities"):
+            errors.append(f"{prefix}: dispatch.strategy={strategy} requires required_capabilities")
+        if not dispatch.get("required_evidence_kinds"):
+            errors.append(f"{prefix}: dispatch.strategy={strategy} requires required_evidence_kinds")
         for field in ("model_request", "fallback_policy", "resolution"):
             if not dispatch.get(field):
                 errors.append(f"{prefix}: dispatch.strategy={strategy} requires dispatch.{field}")
@@ -474,7 +486,7 @@ def validate_gate_policy(
     required_levels = task.get("verification", {}).get("required_levels", [])
     levels = evidence.get("verification", {}).get("levels", {})
     artifacts = evidence.get("artifacts", {})
-    artifact_ids = validate_artifacts(artifacts, errors, prefix)
+    artifact_index = validate_artifacts(artifacts, errors, prefix)
     if enforce_verification:
         for level in required_levels:
             level_data = levels.get(level, {})
@@ -484,19 +496,24 @@ def validate_gate_policy(
             if level_status == "pass_mock" and not conclusion.get("accepted_fallback"):
                 errors.append(f"{prefix}: {level} uses mock evidence without accepted_fallback")
             for evidence_ref in level_data.get("evidence_refs", []):
-                if evidence_ref not in artifact_ids:
+                artifact = artifact_index.get(evidence_ref)
+                if not artifact:
                     errors.append(f"{prefix}: {level} evidence_ref {evidence_ref!r} does not match an artifact_id")
+                elif level_status in {"pass", "pass_mock"} and artifact.get("result") != "pass":
+                    errors.append(
+                        f"{prefix}: {level} references non-passing artifact {evidence_ref!r}"
+                    )
     surfaces = [s.lower() for s in evidence.get("verification", {}).get("changed_surface", [])]
     needs_l2 = "L2" in required_levels or any(matches_any(s, ["api", "dto", "status", "async", "service"]) for s in surfaces)
     needs_l3 = "L3" in required_levels or any(matches_any(s, ["ui", "page", "button", "tab", "modal", "route", "browser"]) for s in surfaces)
     needs_release = any(matches_any(s, ["sql", "schema", "migration", "startup", "package", "release", "static"]) for s in surfaces)
 
     if enforce_verification:
-        if needs_l2 and not (artifacts.get("api") or artifacts.get("sql") or artifacts.get("commands")):
+        if needs_l2 and not any_passing_artifact(artifacts, ("api", "sql", "commands")):
             errors.append(f"{prefix}: L2/API-like change requires api, sql, or command evidence")
-        if needs_l3 and not artifacts.get("browser"):
+        if needs_l3 and not any_passing_artifact(artifacts, ("browser",)):
             errors.append(f"{prefix}: L3/UI-like change requires browser evidence")
-        if needs_release and not (artifacts.get("upgrade_path") or artifacts.get("release_path")):
+        if needs_release and not any_passing_artifact(artifacts, ("upgrade_path", "release_path")):
             errors.append(f"{prefix}: SQL/release-like change requires upgrade_path or release_path evidence")
         if "L4" in required_levels and not (conclusion.get("real_chain_verified") or conclusion.get("accepted_fallback")):
             errors.append(f"{prefix}: L4 requires real_chain_verified=true or accepted_fallback")
@@ -637,10 +654,14 @@ def validate_adapter_resolution(
     pinned_provider = provider_policy.get("provider")
     if policy_mode == "local":
         errors.append(f"{prefix}: worker dispatch cannot use provider_policy.mode=local")
-    if policy_mode == "pinned" and pinned_provider != provider:
-        errors.append(f"{prefix}: resolution provider {provider!r} differs from pinned provider {pinned_provider!r}")
     allowed_providers = fallback.get("allowed_providers") or []
-    if allowed_providers and provider not in allowed_providers:
+    if policy_mode == "pinned" and pinned_provider != provider:
+        compatible_fallback = fallback.get("mode") == "compatible" and provider in allowed_providers
+        if not compatible_fallback:
+            errors.append(
+                f"{prefix}: resolution provider {provider!r} differs from pinned provider {pinned_provider!r}"
+            )
+    elif policy_mode == "auto" and allowed_providers and provider not in allowed_providers:
         errors.append(f"{prefix}: resolution provider {provider!r} is not allowed by fallback_policy")
     if fallback.get("mode") == "strict" and policy_mode == "auto":
         errors.append(f"{prefix}: strict fallback requires a pinned provider")
@@ -738,15 +759,21 @@ def validate_adapter_resolution(
                 )
 
 
-def validate_artifacts(artifacts: dict[str, Any], errors: list[str], prefix: str) -> set[str]:
+def validate_artifacts(
+    artifacts: dict[str, Any], errors: list[str], prefix: str
+) -> dict[str, dict[str, Any]]:
     seen_ids: set[str] = set()
+    artifact_index: dict[str, dict[str, Any]] = {}
     for command in artifacts.get("commands", []):
         artifact_id = command.get("artifact_id") if isinstance(command, dict) else None
         if artifact_id in seen_ids:
             errors.append(f"{prefix}: duplicate artifact_id {artifact_id}")
         seen_ids.add(artifact_id)
-        if isinstance(command, dict) and command.get("result") == "pass" and command.get("exit_code") != 0:
-            errors.append(f"{prefix}: passing command artifact {artifact_id} requires exit_code=0")
+        if isinstance(command, dict):
+            if artifact_id:
+                artifact_index[str(artifact_id)] = command
+            if command.get("result") == "pass" and command.get("exit_code") != 0:
+                errors.append(f"{prefix}: passing command artifact {artifact_id} requires exit_code=0")
     for group, expected_kind in ARTIFACT_GROUP_KINDS.items():
         for artifact in artifacts.get(group, []):
             if not isinstance(artifact, dict):
@@ -755,13 +782,21 @@ def validate_artifacts(artifacts: dict[str, Any], errors: list[str], prefix: str
             if artifact_id in seen_ids:
                 errors.append(f"{prefix}: duplicate artifact_id {artifact_id}")
             seen_ids.add(artifact_id)
+            if artifact_id:
+                artifact_index[str(artifact_id)] = artifact
             if artifact.get("kind") != expected_kind:
                 errors.append(f"{prefix}: artifact {artifact_id} in {group} must use kind={expected_kind}")
-            if artifact.get("result") != "pass" and group in {"api", "sql", "browser", "upgrade_path", "release_path"}:
-                errors.append(f"{prefix}: gate artifact {artifact_id} in {group} must have result=pass")
-            if group == "api" and artifact.get("status_code") is None:
+            if group == "api" and artifact.get("result") == "pass" and artifact.get("status_code") is None:
                 errors.append(f"{prefix}: API artifact {artifact_id} requires status_code")
-    return {str(value) for value in seen_ids if value}
+    return artifact_index
+
+
+def any_passing_artifact(artifacts: dict[str, Any], groups: tuple[str, ...]) -> bool:
+    return any(
+        isinstance(artifact, dict) and artifact.get("result") == "pass"
+        for group in groups
+        for artifact in artifacts.get(group, [])
+    )
 
 
 SUPPORTED_SCHEMA_KEYWORDS = {
@@ -807,13 +842,58 @@ def load_adapters(
         return adapters, errors
     for path in sorted(adapter_dir.glob("*.adapter.json")):
         adapter = load_structured_file(path)
-        errors.extend(validate_schema(adapter, adapter_schema, str(path), adapter_schema))
+        schema_errors = validate_schema(adapter, adapter_schema, str(path), adapter_schema)
+        errors.extend(schema_errors)
+        if schema_errors:
+            continue
+        integrity_errors = validate_adapter_integrity(adapter, str(path))
+        errors.extend(integrity_errors)
+        if integrity_errors:
+            continue
         provider = adapter.get("provider")
         if provider:
             if provider in adapters:
                 errors.append(f"{path}: duplicate provider adapter {provider!r}")
+                continue
             adapters[str(provider)] = adapter
     return adapters, errors
+
+
+def validate_adapter_integrity(adapter: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    models = adapter.get("models") or []
+    model_ids = [str(model.get("id")) for model in models if model.get("id")]
+    duplicate_ids = sorted({model_id for model_id in model_ids if model_ids.count(model_id) > 1})
+    for model_id in duplicate_ids:
+        errors.append(f"{prefix}: duplicate model id {model_id!r}")
+
+    model_component = adapter.get("components", {}).get("model", {})
+    default_model = model_component.get("default_model")
+    if default_model not in model_ids:
+        errors.append(f"{prefix}: default_model {default_model!r} is not declared in models")
+    for fallback_model in model_component.get("fallback_models", []):
+        if fallback_model not in model_ids:
+            errors.append(f"{prefix}: fallback model {fallback_model!r} is not declared in models")
+
+    for model in models:
+        if not model.get("reasoning_profiles"):
+            errors.append(f"{prefix}: model {model.get('id')!r} requires at least one reasoning profile")
+
+    worker = adapter.get("components", {}).get("worker", {})
+    create = worker.get("create") or {}
+    if isinstance(create, dict) and not create.get("worker_id_path"):
+        errors.append(f"{prefix}: worker create operation requires worker_id_path")
+    for operation_name in ("create", "inspect", "cancel"):
+        operation = worker.get(operation_name) or {}
+        if not isinstance(operation, dict):
+            continue
+        for path_field in ("worker_id_path", "status_path"):
+            value = operation.get(path_field)
+            if value is not None and not str(value).startswith("$."):
+                errors.append(
+                    f"{prefix}: worker {operation_name}.{path_field} must use a $. path"
+                )
+    return errors
 
 
 def latest_lease(run: dict[str, Any]) -> dict[str, Any] | None:

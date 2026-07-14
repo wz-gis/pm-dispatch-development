@@ -212,7 +212,12 @@ def codex_dispatch() -> dict:
 
 
 class ValidatorCase(unittest.TestCase):
-    def run_task(self, task: dict, evidence: dict | None = None) -> subprocess.CompletedProcess[str]:
+    def run_task(
+        self,
+        task: dict,
+        evidence: dict | None = None,
+        adapters: list[dict] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = Path(tmp) / task["id"]
             task_dir.mkdir()
@@ -222,8 +227,16 @@ class ValidatorCase(unittest.TestCase):
                 (task_dir / "evidence.json").write_text(
                     json.dumps(evidence, ensure_ascii=False), encoding="utf-8"
                 )
+            command = ["python3", str(VALIDATOR), str(task_path), "--now", NOW]
+            if adapters is not None:
+                adapter_dir = Path(tmp) / "adapters"
+                adapter_dir.mkdir()
+                for adapter in adapters:
+                    path = adapter_dir / f"{adapter['provider']}.adapter.json"
+                    path.write_text(json.dumps(adapter, ensure_ascii=False), encoding="utf-8")
+                command.extend(["--adapter-dir", str(adapter_dir)])
             return subprocess.run(
-                ["python3", str(VALIDATOR), str(task_path), "--now", NOW],
+                command,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -300,6 +313,14 @@ class ValidatorCase(unittest.TestCase):
         evidence = base_evidence()
         evidence["generated_at"] = "not-a-date"
         self.assert_invalid(task, "invalid date-time", evidence)
+
+    def test_invalid_active_lease_timestamp_is_reported_without_traceback(self) -> None:
+        task = self.worker_task()
+        task["runs"][0]["attempts"][0]["lease"]["expires_at"] = "not-a-date"
+        result = self.run_task(task)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid date-time", result.stderr)
+        self.assertNotIn("Traceback (most recent call last)", result.stderr)
 
     def test_level_evidence_ref_must_resolve_to_artifact(self) -> None:
         task = base_task()
@@ -437,6 +458,96 @@ class ValidatorCase(unittest.TestCase):
         result = self.run_task(task)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_compatible_policy_allows_fallback_from_pinned_provider(self) -> None:
+        task = self.worker_task()
+        task["dispatch"].update(
+            {
+                "provider_policy": {"mode": "pinned", "provider": "codex"},
+                "required_capabilities": ["background-worker", "code-edit", "git", "shell"],
+                "heartbeat_required": False,
+                "fallback_policy": {
+                    "mode": "compatible",
+                    "allowed_providers": ["external-cli"],
+                    "allow_model_substitution": False,
+                    "allow_manual_monitoring": True,
+                },
+                "resolution": {
+                    "provider": "external-cli",
+                    "adapter_version": "1",
+                    "model_id": "external-frontier",
+                    "reasoning_profile": "standard",
+                    "provider_reasoning_effort": "normal",
+                    "worker_type": "agent-thread",
+                    "monitor_mode": "poll",
+                    "capabilities": ["background-worker", "code-edit", "git", "shell"],
+                    "evidence_kinds": ["command", "log"],
+                    "resolved_at": NOW,
+                    "reason": "compatible fallback selected external-cli",
+                },
+                "heartbeat": None,
+            }
+        )
+        task["runs"][0].update(
+            {
+                "worker_type": "agent-thread",
+                "worker_id": "agent-thread:fallback-1",
+                "provider": "external-cli",
+                "model_id": "external-frontier",
+                "provider_reasoning_effort": "normal",
+                "resolution_reason": "compatible fallback selected external-cli",
+            }
+        )
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_custom_adapter_worker_type_passes_end_to_end(self) -> None:
+        adapter = json.loads(
+            (ROOT / "references" / "adapters" / "external-cli.adapter.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        adapter["worker_types"] = ["crew-worker"]
+        task = self.worker_task()
+        task["dispatch"].update(
+            {
+                "provider_policy": {"mode": "pinned", "provider": "external-cli"},
+                "required_capabilities": ["background-worker", "code-edit", "git", "shell"],
+                "heartbeat_required": False,
+                "fallback_policy": {
+                    "mode": "strict",
+                    "allowed_providers": ["external-cli"],
+                    "allow_model_substitution": False,
+                    "allow_manual_monitoring": True,
+                },
+                "resolution": {
+                    "provider": "external-cli",
+                    "adapter_version": "1",
+                    "model_id": "external-frontier",
+                    "reasoning_profile": "standard",
+                    "provider_reasoning_effort": "normal",
+                    "worker_type": "crew-worker",
+                    "monitor_mode": "poll",
+                    "capabilities": ["background-worker", "code-edit", "git", "shell"],
+                    "evidence_kinds": ["command", "log"],
+                    "resolved_at": NOW,
+                    "reason": "custom worker transport",
+                },
+                "heartbeat": None,
+            }
+        )
+        task["runs"][0].update(
+            {
+                "worker_type": "crew-worker",
+                "worker_id": "crew-worker:one",
+                "provider": "external-cli",
+                "model_id": "external-frontier",
+                "provider_reasoning_effort": "normal",
+                "resolution_reason": "custom worker transport",
+            }
+        )
+        result = self.run_task(task, adapters=[adapter])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_resolution_keeps_generic_and_provider_reasoning_separate(self) -> None:
         task = self.worker_task()
         task["dispatch"]["model_request"]["reasoning_profile"] = "deep"
@@ -503,6 +614,42 @@ class ValidatorCase(unittest.TestCase):
         task = self.worker_task()
         task["dispatch"]["required_evidence_kinds"].append("browser")
         self.assert_invalid(task, "evidence_kinds do not cover required_evidence_kinds")
+
+    def test_nonterminal_task_can_record_failed_gate_artifact(self) -> None:
+        evidence = base_evidence()
+        evidence["artifacts"]["browser"] = [
+            {**artifact("browser", "browser-001"), "result": "fail"}
+        ]
+        result = self.run_task(base_task(), evidence)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_terminal_gate_rejects_reference_to_failed_artifact(self) -> None:
+        task = base_task("SPEC-042")
+        task.update(
+            {
+                "display_name": "SPEC-042 P1 WEB 新增页面",
+                "title": "新增页面",
+                "type": "spec",
+                "area": ["WEB"],
+                "status": "VERIFIED",
+            }
+        )
+        task["lifecycle"]["phase"] = "closure"
+        task["closure"]["status"] = "ready"
+        task["verification"].update({"required_levels": ["L3"], "status": "L3_VERIFIED"})
+        evidence = base_evidence("SPEC-042")
+        evidence["verification"]["changed_surface"] = ["ui page"]
+        evidence["verification"]["levels"] = {
+            "L3": {
+                "status": "pass",
+                "summary": "browser flow failed",
+                "evidence_refs": ["browser-001"],
+            }
+        }
+        evidence["artifacts"]["browser"] = [
+            {**artifact("browser", "browser-001"), "result": "fail"}
+        ]
+        self.assert_invalid(task, "references non-passing artifact", evidence)
 
     def test_batch_worker_requires_two_to_four_task_ids(self) -> None:
         task = self.worker_task()

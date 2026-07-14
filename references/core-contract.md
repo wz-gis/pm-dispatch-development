@@ -56,6 +56,7 @@ Keep lifecycle, verification, blocker, and closure as separate tracks, but valid
 - `model_request` contains only portable intent: quality, `reasoning_profile`, latency, and cost.
 - `resolution` records the selected Provider, Adapter version, model, provider-specific reasoning value, Worker type, monitor mode, capabilities, and evidence kinds.
 - `strict` requires a pinned Provider. `compatible` may use declared fallback Providers, but never silently drops required capabilities or reasoning support.
+- A pinned Provider is tried first; in `compatible` mode a different Provider is valid only when listed in `allowed_providers`.
 - Every Run copies actual Provider/model/reasoning fields from `resolution`; request fields never masquerade as runtime facts.
 - `IN_IMPL` and `IN_INTEGRATION` worker tasks require at least one Run.
 - Every Run has one or more Attempts; Attempt IDs are unique within the Run.
@@ -97,7 +98,20 @@ captured_at: 2026-07-13T12:00:00Z
 evidence_ref: evidence/browser-001.json
 ```
 
-Command artifacts additionally require `command` and `exit_code`. Passing commands require exit code zero. API artifacts require `status_code`. Required L0-L4 `evidence_refs` must resolve to an artifact ID.
+Artifacts may record `pass`, `fail`, or `info`. Failed and informational artifacts remain valid history but cannot satisfy a terminal Gate. Command artifacts additionally require `command` and `exit_code`; passing commands require exit code zero. Passing API artifacts require `status_code`. Required L0-L4 `evidence_refs` must resolve to a passing Artifact ID.
+
+## Adapter Protocol
+
+Adapter protocol v1 declares Worker `transport` plus structured `create`, `inspect`, and `cancel` operations. Each operation defines its target, required inputs, timeout, Worker ID path, and status path. Adapter integrity validation also enforces unique model IDs and valid default/fallback model references. Individual models may support only the reasoning profiles they actually implement.
+
+Build an invocation envelope and decode the provider result through:
+
+```bash
+python3 scripts/adapter_protocol.py references/adapters/external-cli.adapter.json create \
+  --inputs '{"title":"SPEC-042 页面","prompt":"implement and verify"}'
+```
+
+Migration validates every v2 result before writing any input. `--write` uses an atomic replacement and preserves the original as `<name>.v1.bak`; unknown Providers and invalid migrated output stop before overwrite.
 
 ## Validation
 
@@ -116,4 +130,6 @@ The machine sources of truth are:
 - `references/schemas/adapter.schema.json`
 - `references/adapters/*.adapter.json`
 - `scripts/resolve_pm_dispatch.py`
+- `scripts/adapter_protocol.py`
+- `scripts/render_task_panel.py`
 - `scripts/validate_pm_dispatch.py`

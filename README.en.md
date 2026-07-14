@@ -11,6 +11,7 @@ A PM-oriented delivery skill for single-project work, multi-project integration,
 - Browser, API, and SQL evidence use structured Artifacts instead of free-form strings.
 - The validator checks the state matrix, concurrency, Heartbeat, Run/Attempt/Lease, dependency cycles, and resource locks.
 - The core contract is platform-neutral; the Resolver selects an Adapter from portable capability and model requests, then records actual values in Resolution.
+- Adapter protocol v1 makes Worker transport, inputs, timeouts, and output paths machine-readable.
 - Task and Evidence use Schema v2; legacy documents can be upgraded with the migration script.
 
 ## Install
@@ -99,6 +100,12 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks
 python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 ```
 
+Write mode validates complete v2 output, preserves the source as `.v1.bak`, and then performs an atomic replacement. The task panel uses deterministic status mapping and snapshot tests:
+
+```bash
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks
+```
+
 ## Sources Of Truth
 
 - `SKILL.md`: execution order and progressive-disclosure routing.
@@ -109,7 +116,9 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 - `references/schemas/`: formal data structures.
 - `scripts/validate_pm_dispatch.py`: Gate, dependency, and lock validation.
 - `scripts/resolve_pm_dispatch.py`: capability, model, and fallback resolution.
+- `scripts/adapter_protocol.py`: Worker operation envelopes and provider-result decoding.
 - `scripts/migrate_pm_dispatch.py`: conservative migration to Schema v2.
+- `scripts/render_task_panel.py`: deterministic five-column task panel rendering.
 - `tests/`: persistent Adapter, Resolver, migration, and Gate regression tests.
 
 Schemas, Adapter JSON, and the validator are authoritative. The README does not redefine fields.

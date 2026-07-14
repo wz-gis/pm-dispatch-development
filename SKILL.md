@@ -15,6 +15,7 @@ description: Use when managing software delivery through PM task boards, worker 
 - 使用 Codex 可见 Worker 时，读取 `references/adapters/codex.md` 和 `references/adapters/codex.adapter.json`。
 - 使用其它 Agent、CI 或人工执行时，读取 `references/adapters/generic.md`。
 - 需要目录、看板、Prompt 和 Heartbeat 示例时，读取 `references/operating-model.md`。
+- 用户要求任务面板时，运行 `scripts/render_task_panel.py`，不要凭记忆重排状态。
 - 分发前运行 `scripts/resolve_pm_dispatch.py`；Gate 判定前运行 `scripts/validate_pm_dispatch.py`。
 - 修改本 skill 后运行 `python3 -m unittest discover -s tests -v`。
 
@@ -51,6 +52,12 @@ attempt_id:   attempt-BUG-041-impl-w01-a01
 - 主面板不展示 Owner、Worker、Run、Lease、模型或 Adapter；仅在用户要求详情或存在异常时另加“运行详情”。
 - 默认不在表格前后复述字段含义，不使用卡片或逐任务长段落。
 
+正式状态映射由 `scripts/render_task_panel.py::STATUS_LABELS` 定义：`IN_* → 进行中`，Blocked 状态映射对应阻塞类型，`NEW → 方案待定`，`TRIAGED/CONTRACT → 待确认`，`READY_* → 待实施/待验收`，Partial/Mock → `可选补验`。所有 Task Schema 状态必须有映射并通过快照测试。
+
+```bash
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks
+```
+
 ## Choose Strategy
 
 - `direct`：当前线程完成小型、低风险、可直接验证的任务；不创建 Run、Attempt、Lease、Heartbeat 或资源锁。
@@ -80,6 +87,7 @@ attempt_id:   attempt-BUG-041-impl-w01-a01
 
 5. **Dispatch**
    - 先用 Resolver 将 `model_request` 和能力要求解析为 `resolution`，不得由 AI 猜 Provider 参数。
+   - 用 `scripts/adapter_protocol.py` 从 Adapter 构建版本化操作 envelope；按 transport 执行后，从声明路径提取真实 `worker_id/status`。
    - 按 Resolution 对应的 Provider Adapter 创建真实 Worker，并把真实 Worker ID 与实际模型参数写回 Run。
    - 默认使用用户可见 Worker；只有用户明确允许时才使用内部 sub-agent。
    - 创建 Attempt、Lease、必要资源锁和经授权的 Heartbeat。不得先写“running”再伪造 Worker ID。
@@ -107,9 +115,11 @@ UI/L3 必须有结构化 Browser Artifact；API/L2 必须有 API、SQL 或成功
 ```bash
 python3 -m unittest discover -s tests -v
 python3 scripts/resolve_pm_dispatch.py docs/tasks/BUG-041/task.yaml --write
+python3 scripts/adapter_protocol.py references/adapters/codex.adapter.json create --inputs '{"title":"BUG-041","prompt":"..."}'
 python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml
 python3 scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
 python3 scripts/migrate_pm_dispatch.py docs/tasks --write
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks
 ```
 
 Validator 失败时不要手工覆盖结论。修复 Task/Evidence，或记录真实 Blocker。

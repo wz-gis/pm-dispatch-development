@@ -2,7 +2,7 @@
 
 Use this adapter when `task.yaml.dispatch.resolution.provider` is `codex`.
 
-The machine contract is `codex.adapter.json`. It currently uses `gpt-5.6-sol` and maps portable reasoning profiles to Codex reasoning effort:
+The machine contract is `codex.adapter.json`. Protocol v1 uses the `tool` transport with structured `create_thread`, `read_thread`, and `set_thread_archived` operations. It currently uses `gpt-5.6-sol` and maps portable reasoning profiles to Codex reasoning effort:
 
 | Core profile | Codex effort |
 | --- | --- |
@@ -11,7 +11,7 @@ The machine contract is `codex.adapter.json`. It currently uses `gpt-5.6-sol` an
 | `deep` | `high` |
 | `critical` | `xhigh` |
 
-Run `scripts/resolve_pm_dispatch.py` before creation. Create a visible Codex thread with the exact `resolution.model_id` and `resolution.provider_reasoning_effort`, then persist the returned thread ID as `worker_id`. Do not mark a Run active before a real worker ID exists.
+Run `scripts/resolve_pm_dispatch.py` before creation, then build the `create` envelope with `scripts/adapter_protocol.py`. Execute the declared tool with the exact `resolution.model_id` and `resolution.provider_reasoning_effort`; decode the returned thread ID through `worker_id_path` and persist it as `worker_id`. Do not mark a Run active before a real worker ID exists.
 
 Use `worker_label` as the visible thread title. Example:
 

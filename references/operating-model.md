@@ -245,6 +245,7 @@ Resolution：provider=codex，model=gpt-5.6-sol，reasoning_profile=standard，p
 
 ## Board Operations
 
+- Generate the canonical panel with `python3 scripts/render_task_panel.py --tasks-dir docs/tasks`; status mapping and ordering are code-defined and snapshot-tested.
 - 默认任务面板使用固定五列，不把运行时元数据挤入主视图：
 
 | 状态 | 任务 | 优先级 | 当前进展 | 下一步 |

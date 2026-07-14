@@ -75,9 +75,10 @@ class ResolverCase(unittest.TestCase):
     def test_compatible_policy_can_record_manual_monitor_fallback(self) -> None:
         external = copy.deepcopy(self.adapters["codex"])
         external.update({"provider": "external-cli", "worker_types": ["agent-thread"]})
-        external["components"]["worker"].update(
-            {"create": "agent start", "inspect": "agent status", "cancel": "agent cancel"}
-        )
+        external["components"]["worker"]["transport"] = "command"
+        external["components"]["worker"]["create"]["target"] = "agent start --json"
+        external["components"]["worker"]["inspect"]["target"] = "agent status --json"
+        external["components"]["worker"]["cancel"]["target"] = "agent cancel --json"
         external["components"]["monitor"].update(
             {"modes": ["manual"], "supports_lease_renewal": False}
         )
@@ -112,6 +113,17 @@ class ResolverCase(unittest.TestCase):
         with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider/model"):
             self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
 
+    def test_worker_request_rejects_empty_capability_or_evidence_contract(self) -> None:
+        dispatch = worker_dispatch()
+        dispatch["required_capabilities"] = []
+        with self.assertRaisesRegex(self.resolver.ResolutionError, "required_capabilities"):
+            self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
+
+        dispatch = worker_dispatch()
+        dispatch["required_evidence_kinds"] = []
+        with self.assertRaisesRegex(self.resolver.ResolutionError, "required_evidence_kinds"):
+            self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
+
     def test_non_codex_machine_adapter_resolves_without_vendor_assumptions(self) -> None:
         external = json.loads(
             (ROOT / "references" / "adapters" / "external-cli.adapter.json").read_text(
@@ -131,6 +143,34 @@ class ResolverCase(unittest.TestCase):
         self.assertEqual(resolution["worker_type"], "agent-thread")
         self.assertEqual(resolution["provider_reasoning_effort"], "deliberate")
         self.assertEqual(resolution["monitor_mode"], "poll")
+
+    def test_model_fallback_can_route_to_specialized_reasoning_model(self) -> None:
+        adapter = copy.deepcopy(self.adapters["codex"])
+        adapter["components"]["model"].update(
+            {"default_model": "fast-model", "fallback_models": ["deep-model"]}
+        )
+        adapter["models"] = [
+            {
+                "id": "fast-model",
+                "aliases": [],
+                "quality": "frontier",
+                "latency_class": "normal",
+                "cost_class": "balanced",
+                "reasoning_profiles": {"fast": "low", "standard": "medium"},
+            },
+            {
+                "id": "deep-model",
+                "aliases": [],
+                "quality": "frontier",
+                "latency_class": "normal",
+                "cost_class": "balanced",
+                "reasoning_profiles": {"deep": "high", "critical": "xhigh"},
+            },
+        ]
+        dispatch = worker_dispatch()
+        dispatch["fallback_policy"]["allow_model_substitution"] = True
+        resolution = self.resolver.resolve_dispatch(dispatch, {"codex": adapter}, NOW)
+        self.assertEqual(resolution["model_id"], "deep-model")
 
 
 if __name__ == "__main__":
