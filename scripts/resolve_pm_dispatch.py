@@ -19,14 +19,9 @@ from validate_pm_dispatch import (  # noqa: E402
     assert_supported_schema,
     load_adapters,
     load_structured_file,
+    runtime_file_for,
+    validate_schema,
 )
-
-
-QUALITY_RANK = {"fast": 0, "balanced": 1, "frontier": 2}
-LATENCY_RANK = {"low": 0, "normal": 1, "high": 2}
-COST_RANK = {"economical": 0, "balanced": 1, "premium": 2}
-REQUEST_LATENCY_MAX = {"low": 0, "normal": 1, "relaxed": 2}
-REQUEST_COST_MAX = {"economical": 0, "balanced": 1, "unbounded": 2}
 
 
 class ResolutionError(ValueError):
@@ -38,7 +33,7 @@ def resolve_dispatch(
 ) -> dict[str, Any]:
     provider_policy = dispatch.get("provider_policy") or {}
     fallback = dispatch.get("fallback_policy") or {}
-    request = dispatch.get("model_request") or {}
+    profile = dispatch.get("reasoning_profile")
     policy_mode = provider_policy.get("mode")
     fallback_mode = fallback.get("mode")
 
@@ -65,7 +60,7 @@ def resolve_dispatch(
             continue
 
         required = set(dispatch.get("required_capabilities", []))
-        if monitor_mode == "manual" and "heartbeat" in required:
+        if monitor_mode in {"manual", "milestone", "event-lease"} and "heartbeat" in required:
             required.remove("heartbeat")
         available = set(adapter.get("capabilities", []))
         missing = required - available
@@ -82,15 +77,19 @@ def resolve_dispatch(
             failures.append(f"{provider}: missing evidence kinds {sorted(missing_evidence)}")
             continue
 
-        model = select_model(adapter, request, fallback)
-        if model is None:
-            failures.append(f"{provider}: no model satisfies the request")
-            continue
-
-        profile = request.get("reasoning_profile")
-        provider_effort = model.get("reasoning_profiles", {}).get(profile)
+        components = adapter.get("components", {})
+        model_route = components.get("model", {}).get("profiles", {}).get(profile)
+        if components.get("model"):
+            if not model_route:
+                failures.append(f"{provider}: cannot map model route for reasoning profile {profile!r}")
+                continue
+            model_id = model_route["model_id"]
+            provider_effort = model_route["reasoning_effort"]
+        else:
+            model_id = None
+            provider_effort = components.get("reasoning", {}).get("profiles", {}).get(profile)
         if not provider_effort:
-            failures.append(f"{provider}: model {model.get('id')} cannot map profile {profile}")
+            failures.append(f"{provider}: cannot map reasoning profile {profile!r}")
             continue
 
         worker_types = adapter.get("worker_types", [])
@@ -99,12 +98,18 @@ def resolve_dispatch(
             continue
 
         resolved_capabilities = sorted(required)
+        if monitor_mode in {"milestone", "event-lease"} and "milestone-notify" in available:
+            resolved_capabilities = sorted(set(resolved_capabilities) | {"milestone-notify"})
+        if monitor_mode == "event-lease":
+            resolved_capabilities = sorted(
+                set(resolved_capabilities) | {"lease-watchdog", "terminal-event-wait"}
+            )
         if monitor_mode == "heartbeat" and "heartbeat" in available:
             resolved_capabilities = sorted(set(resolved_capabilities) | {"heartbeat"})
         return {
             "provider": provider,
             "adapter_version": str(adapter.get("adapter_version")),
-            "model_id": model["id"],
+            "model_id": model_id,
             "reasoning_profile": profile,
             "provider_reasoning_effort": provider_effort,
             "worker_type": worker_types[0],
@@ -112,11 +117,13 @@ def resolve_dispatch(
             "capabilities": resolved_capabilities,
             "evidence_kinds": sorted(required_evidence),
             "resolved_at": resolved_at,
-            "reason": resolution_reason(policy_mode, fallback_mode, provider, model["id"], monitor_mode),
+            "reason": resolution_reason(
+                policy_mode, fallback_mode, provider, model_id, monitor_mode
+            ),
         }
 
     detail = "; ".join(failures) if failures else "no provider candidates"
-    raise ResolutionError(f"no compatible provider/model: {detail}")
+    raise ResolutionError(f"no compatible provider: {detail}")
 
 
 def provider_candidates(
@@ -137,11 +144,22 @@ def provider_candidates(
 
 
 def select_monitor_mode(dispatch: dict[str, Any], adapter: dict[str, Any]) -> str | None:
-    modes = adapter.get("components", {}).get("monitor", {}).get("modes", [])
+    monitor = adapter.get("components", {}).get("monitor", {})
+    modes = monitor.get("modes", [])
+    capabilities = set(adapter.get("capabilities", []))
     fallback = dispatch.get("fallback_policy") or {}
     if dispatch.get("heartbeat_required"):
         if "heartbeat" in modes:
             return "heartbeat"
+        if (
+            "event-lease" in modes
+            and monitor.get("supports_lease_renewal")
+            and monitor.get("event_wait_target")
+            and {"lease-watchdog", "terminal-event-wait"}.issubset(capabilities)
+        ):
+            return "event-lease"
+        if "milestone" in modes:
+            return "milestone"
         if (
             fallback.get("mode") == "compatible"
             and fallback.get("allow_manual_monitoring")
@@ -149,52 +167,30 @@ def select_monitor_mode(dispatch: dict[str, Any], adapter: dict[str, Any]) -> st
         ):
             return "manual"
         return None
-    for preferred in ("poll", "manual", "heartbeat"):
+    if (
+        "event-lease" in modes
+        and monitor.get("supports_lease_renewal")
+        and monitor.get("event_wait_target")
+        and {"lease-watchdog", "terminal-event-wait"}.issubset(capabilities)
+    ):
+        return "event-lease"
+    for preferred in ("milestone", "poll", "manual", "heartbeat"):
         if preferred in modes:
             return preferred
     return None
-
-
-def select_model(
-    adapter: dict[str, Any], request: dict[str, Any], fallback: dict[str, Any]
-) -> dict[str, Any] | None:
-    component = adapter.get("components", {}).get("model", {})
-    default_model = component.get("default_model")
-    allowed_ids = [default_model]
-    if fallback.get("allow_model_substitution"):
-        allowed_ids.extend(component.get("fallback_models", []))
-    models = {model.get("id"): model for model in adapter.get("models", [])}
-    for model_id in allowed_ids:
-        model = models.get(model_id)
-        if model and model_satisfies(model, request):
-            return model
-    return None
-
-
-def model_satisfies(model: dict[str, Any], request: dict[str, Any]) -> bool:
-    requested_quality = request.get("quality")
-    quality = QUALITY_RANK.get(model.get("quality"), -1)
-    if requested_quality != "any" and quality < QUALITY_RANK.get(requested_quality, 99):
-        return False
-    latency = LATENCY_RANK.get(model.get("latency_class", "normal"), 99)
-    if latency > REQUEST_LATENCY_MAX.get(request.get("latency"), -1):
-        return False
-    cost = COST_RANK.get(model.get("cost_class", "balanced"), 99)
-    if cost > REQUEST_COST_MAX.get(request.get("cost"), -1):
-        return False
-    return request.get("reasoning_profile") in model.get("reasoning_profiles", {})
 
 
 def resolution_reason(
     policy_mode: str | None,
     fallback_mode: str | None,
     provider: str,
-    model_id: str,
+    model_id: str | None,
     monitor_mode: str,
 ) -> str:
+    model_phrase = model_id or "inherited/provider-default model"
     return (
         f"{policy_mode or 'unknown'} provider policy with {fallback_mode or 'unknown'} fallback "
-        f"selected {provider}/{model_id} using {monitor_mode} monitoring"
+        f"selected {provider}/{model_phrase} using {monitor_mode} monitoring"
     )
 
 
@@ -221,9 +217,49 @@ def main() -> int:
     resolved_at = args.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     resolution = resolve_dispatch(task.get("dispatch", {}), adapters, resolved_at)
     if args.write:
-        task["dispatch"]["resolution"] = resolution
-        task["dispatch"]["selected_at"] = resolved_at
-        task_path.write_text(json.dumps(task, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if task.get("schema_version") == "4":
+            runtime_path = runtime_file_for(task_path, task, None)
+            if runtime_path is None:
+                raise ResolutionError("Task v4 requires runtime_file before resolution can be written")
+            if runtime_path.exists():
+                runtime = load_structured_file(runtime_path)
+            else:
+                runtime = {
+                    "schema_version": "1",
+                    "task_id": task.get("id"),
+                    "task_schema_version": "4",
+                    "resolution": None,
+                    "selected_at": None,
+                    "heartbeat": None,
+                    "resources": {"locks": []},
+                    "runs": [],
+                    "event_log_file": "events.jsonl",
+                    "last_updated": resolved_at,
+                }
+            runtime["resolution"] = resolution
+            runtime["selected_at"] = resolved_at
+            runtime["last_updated"] = resolved_at
+            runtime_schema = load_structured_file(schema_dir / "runtime.schema.json")
+            runtime_errors = validate_schema(
+                runtime, runtime_schema, str(runtime_path), runtime_schema
+            )
+            if runtime_errors:
+                raise ResolutionError("invalid Runtime output: " + "; ".join(runtime_errors))
+            runtime_path.parent.mkdir(parents=True, exist_ok=True)
+            event_path = runtime_path.parent / runtime["event_log_file"]
+            if not event_path.exists():
+                event_path.write_text("", encoding="utf-8")
+            runtime_path.write_text(
+                json.dumps(runtime, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            task["dispatch"]["resolution"] = resolution
+            task["dispatch"]["selected_at"] = resolved_at
+            task_path.write_text(
+                json.dumps(task, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
     print(json.dumps(resolution, ensure_ascii=False, indent=2))
     return 0
 

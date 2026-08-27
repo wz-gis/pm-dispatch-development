@@ -9,16 +9,29 @@
     "protocol_version",
     "adapter_version",
     "provider",
+    "status_map",
     "worker_types",
     "capabilities",
-    "components",
-    "models"
+    "components"
   ],
   "properties": {
-    "schema_version": {"type": "string", "enum": ["1"]},
-    "protocol_version": {"type": "string", "enum": ["1"]},
+    "schema_version": {"type": "string", "enum": ["3"]},
+    "protocol_version": {"type": "string", "enum": ["2"]},
     "adapter_version": {"type": "string", "pattern": "^[0-9]+$"},
     "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+    "status_map": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider_status", "core_status"],
+        "properties": {
+          "provider_status": {"type": "string", "minLength": 1},
+          "core_status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]}
+        }
+      }
+    },
     "worker_types": {
       "type": "array",
       "minItems": 1,
@@ -34,45 +47,74 @@
     "components": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["worker", "model", "monitor", "evidence"],
+      "required": ["worker", "reasoning", "monitor", "evidence"],
       "properties": {
         "worker": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["transport", "create", "inspect", "cancel", "supports_background"],
+          "required": ["transport", "create", "send", "inspect", "wait", "rebind", "collect", "cancel", "supports_background"],
           "properties": {
             "transport": {"type": "string", "enum": ["tool", "command", "api", "manual"]},
             "create": {"$ref": "#/$defs/worker_operation"},
+            "send": {"$ref": "#/$defs/worker_operation"},
             "inspect": {"$ref": "#/$defs/worker_operation"},
+            "wait": {"$ref": "#/$defs/worker_operation"},
+            "rebind": {"$ref": "#/$defs/worker_operation"},
+            "collect": {"$ref": "#/$defs/worker_operation"},
             "cancel": {"$ref": "#/$defs/worker_operation"},
             "supports_background": {"type": "boolean"}
+          }
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profiles"],
+          "properties": {
+            "profiles": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "fast": {"type": "string", "minLength": 1},
+                "standard": {"type": "string", "minLength": 1},
+                "deep": {"type": "string", "minLength": 1},
+                "critical": {"type": "string", "minLength": 1}
+              }
+            }
           }
         },
         "model": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["default_model", "fallback_models"],
+          "required": ["profiles"],
           "properties": {
-            "default_model": {"type": "string", "minLength": 1},
-            "fallback_models": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
+            "profiles": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["fast", "standard", "deep", "critical"],
+              "properties": {
+                "fast": {"$ref": "#/$defs/model_route"},
+                "standard": {"$ref": "#/$defs/model_route"},
+                "deep": {"$ref": "#/$defs/model_route"},
+                "critical": {"$ref": "#/$defs/model_route"}
+              }
             }
           }
         },
         "monitor": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["modes", "supports_lease_renewal"],
+          "required": ["modes", "supports_lease_renewal", "event_wait_target", "disconnect_probe_operation"],
           "properties": {
             "modes": {
               "type": "array",
               "minItems": 1,
               "uniqueItems": true,
-              "items": {"type": "string", "enum": ["heartbeat", "poll", "manual"]}
+              "items": {"type": "string", "enum": ["event-lease", "milestone", "heartbeat", "poll", "manual"]}
             },
-            "supports_lease_renewal": {"type": "boolean"}
+            "supports_lease_renewal": {"type": "boolean"},
+            "heartbeat_target": {"type": "string", "enum": ["coordinator-thread"]},
+            "event_wait_target": {"type": ["string", "null"], "minLength": 1},
+            "disconnect_probe_operation": {"type": "string", "enum": ["inspect"]}
           }
         },
         "evidence": {
@@ -95,43 +137,13 @@
           }
         }
       }
-    },
-    "models": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "aliases", "quality", "latency_class", "cost_class", "reasoning_profiles"],
-        "properties": {
-          "id": {"type": "string", "minLength": 1},
-          "aliases": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"type": "string", "minLength": 1}
-          },
-          "quality": {"type": "string", "enum": ["fast", "balanced", "frontier"]},
-          "latency_class": {"type": "string", "enum": ["low", "normal", "high"]},
-          "cost_class": {"type": "string", "enum": ["economical", "balanced", "premium"]},
-          "reasoning_profiles": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "fast": {"type": "string", "minLength": 1},
-              "standard": {"type": "string", "minLength": 1},
-              "deep": {"type": "string", "minLength": 1},
-              "critical": {"type": "string", "minLength": 1}
-            }
-          }
-        }
-      }
     }
   },
   "$defs": {
     "worker_operation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target", "input_fields", "worker_id_path", "status_path", "timeout_seconds"],
+      "required": ["target", "input_fields", "optional_input_fields", "result_paths", "timeout_seconds", "idempotency"],
       "properties": {
         "target": {"type": "string", "minLength": 1},
         "input_fields": {
@@ -140,9 +152,35 @@
           "uniqueItems": true,
           "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
         },
-        "worker_id_path": {"type": ["string", "null"]},
-        "status_path": {"type": "string", "minLength": 1},
-        "timeout_seconds": {"type": "integer", "minimum": 1}
+        "optional_input_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+        },
+        "result_paths": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["worker_id", "status", "continuation_token", "event_cursor", "delegation"],
+          "properties": {
+            "worker_id": {"type": ["string", "null"]},
+            "status": {"type": "string", "minLength": 1},
+            "continuation_token": {"type": ["string", "null"]},
+            "event_cursor": {"type": ["string", "null"]},
+            "delegation": {"type": ["string", "null"]}
+          }
+        },
+        "timeout_seconds": {"type": "integer", "minimum": 1},
+        "idempotency": {"type": "string", "enum": ["required", "optional", "none"]}
+      }
+    },
+    "model_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "complexity", "reasoning_effort"],
+      "properties": {
+        "model_id": {"type": "string", "minLength": 1},
+        "complexity": {"type": "string", "enum": ["simple", "complex"]},
+        "reasoning_effort": {"type": "string", "minLength": 1}
       }
     }
   }

@@ -5,121 +5,73 @@ description: Use when managing software delivery through PM task boards, worker 
 
 # PM 调度式开发
 
-## Core Principle
+## Principle
 
-把任务文档作为事实源，把 Worker 当作可恢复的执行器，把 Gate 结论建立在机器可校验的证据上。不要用口头“完成”替代结构化 Evidence。
+Task/Evidence 是事实源，Worker 是可恢复执行器；只用机器可校验的 Evidence 更新 Gate。可逆时继续推进，只有硬 Blocker 才停止。
 
-## Read By Need
+## Fast Execution
 
-- 创建、更新或验收任务时，读取 `references/core-contract.md`。
-- 使用 Codex 可见 Worker 时，读取 `references/adapters/codex.md` 和 `references/adapters/codex.adapter.json`。
-- 使用其它 Agent、CI 或人工执行时，读取 `references/adapters/generic.md`。
-- 需要目录、看板、Prompt 和 Heartbeat 示例时，读取 `references/operating-model.md`。
-- 用户要求任务面板时，运行 `scripts/render_task_panel.py`，不要凭记忆重排状态。
-- 分发前运行 `scripts/resolve_pm_dispatch.py`；Gate 判定前运行 `scripts/validate_pm_dispatch.py`。
-- 修改本 skill 后运行 `python3 -m unittest discover -s tests -v`。
+1. 选最低足够的模型/effort，关键不确定性才升级。
+2. 无新证据，不新增探索或重复检查。
+3. 证据足够后立即实施。
+4. 只验正确性关键路径和必要回归。
+5. 不为无证据的未来风险扩围。
+6. 关键验证通过且无新证据即停。
 
-Schema 和 Adapter JSON 是机器事实源；Markdown 只解释意图，不重新定义字段。
-Task/Evidence 当前使用 `schema_version: "2"`；旧文件先运行 `scripts/migrate_pm_dispatch.py`。
+## Load Only What You Need
+
+- 任务面板运行 `scripts/render_task_panel.py`；改格式才读 `references/task-panel.md`。
+- 创建/修复 Task/Evidence/Runtime 或解释 Validator 错误时读 `references/core-contract.md` 和 Schema。
+- 遇到不确定性、恢复失败或准备标记 Blocked 时读取 `references/autonomy.md`。
+- 需要 YAML 示例读 `references/task-examples.md`；需要 Worker/Heartbeat Prompt 读 `references/prompts.md`。
+- 分发 Codex Worker 先运行 Resolver 和 Adapter Protocol；脚本消费 Adapter JSON，不要把 JSON 加载进上下文；执行/恢复时读 `references/adapters/codex.md`。
+- 其它 Agent、CI 或人工执行读 `references/adapters/generic.md`。
+- Worker 或任务终态时读 `references/closure.md` 收口。
+- 修改本 Skill 时运行测试和 `quick_validate.py`。
+
+Schema、Adapter、Resolver、Validator 是机器事实源。Task v4 保存契约，Runtime v1 保存运行态，Evidence v2 保存证据；Task v3 仅兼容读取。
 
 ## Naming
 
-统一使用机器 ID 和可见名称：
+机器 ID 使用 `BUG-041`；可见名称使用 `BUG-041 P1 AA 最近诊断记录`。Worker、Run、Attempt 使用 `BUG-041-impl-w01`、`run-BUG-041-impl-w01`、`attempt-BUG-041-impl-w01-a01`。类型支持 `BUG`、`SPEC`、`ONBOARD`、`RELEASE`、`ENV`、`CHORE`。
 
-```text
-task_id:      BUG-041
-display_name: BUG-041 P1 AA 最近诊断记录
-worker_name:  BUG-041-impl-w01
-worker_label: BUG-041 P1 AA 最近诊断记录 [impl w01]
-run_id:       run-BUG-041-impl-w01
-attempt_id:   attempt-BUG-041-impl-w01-a01
-```
+## Strategy
 
-支持 `BUG`、`SPEC`、`ONBOARD`、`RELEASE`、`ENV`、`CHORE`。目录名、`task.yaml.id` 和 `evidence.yaml.task_id` 必须一致。
+- `direct`：当前线程处理低风险小任务；不创建 Run、Attempt、Lease、Heartbeat 或锁。
+- `single-worker`：任务级粘性 Worker 跨 Run/Gate 实现和验证；补验、修复、Gate 切换复用原 Worker。
+- `batch-worker`：2-4 个同工程、同 Gate、同回归面任务共享 Worker，各自保留 Task/Evidence。
+- `full-dispatch`：跨工程、数据库、发布、迁移、安全或真实链路按 Gate 串行。
 
-## Task Panel
-
-用户要求“任务面板”“当前任务”或进度总览时，默认输出紧凑 Markdown 表格：
-
-| 状态 | 任务 | 优先级 | 当前进展 | 下一步 |
-| --- | --- | --- | --- | --- |
-| 进行中 | BUG-041 最近诊断记录 | P1 | 已完成数据回填，自动测试通过 | 补 API/性能证据，再执行 L3/L4 |
-
-- `任务` 只显示 `<id> <title>`；优先级已有独立列，不重复 Area 或完整 `display_name`。
-- `状态` 使用面向 PM 的短标签，如 `进行中`、`待确认`、`待实施`、`环境阻塞`、`可选优化`、`方案待定`、`可选补验`。
-- `当前进展` 只写已发生且有事实依据的结果；`下一步` 只写一个可执行动作或明确决策。
-- 排序顺序为进行中、阻塞、待确认/待实施、可选项；同组内按 `P0` 到 `P3`。
-- 主面板不展示 Owner、Worker、Run、Lease、模型或 Adapter；仅在用户要求详情或存在异常时另加“运行详情”。
-- 默认不在表格前后复述字段含义，不使用卡片或逐任务长段落。
-
-正式状态映射由 `scripts/render_task_panel.py::STATUS_LABELS` 定义：`IN_* → 进行中`，Blocked 状态映射对应阻塞类型，`NEW → 方案待定`，`TRIAGED/CONTRACT → 待确认`，`READY_* → 待实施/待验收`，Partial/Mock → `可选补验`。所有 Task Schema 状态必须有映射并通过快照测试。
-
-```bash
-python3 scripts/render_task_panel.py --tasks-dir docs/tasks
-```
-
-## Choose Strategy
-
-- `direct`：当前线程完成小型、低风险、可直接验证的任务；不创建 Run、Attempt、Lease、Heartbeat 或资源锁。
-- `single-worker`：一个 Worker 完成实现和验证。
-- `batch-worker`：2-4 个同工程、同 Gate、同回归面的任务共享 Worker，但保留独立 Task、Evidence 和结论。
-- `full-dispatch`：跨工程、数据库、发布、迁移、安全或真实链路任务按 Gate 串行推进。
-
-默认选择最轻且可验证的策略。缺少真实证据、跨 Owner、跨仓库或出现资源冲突时升级策略。
+默认选择最轻的可验证策略；跨 Owner、仓库或资源冲突时升级。
 
 ## Workflow
 
-1. **Read context**
-   - 读取看板、Task、Evidence、Decision、活跃 Run、Lease、依赖和资源锁。
-   - 编辑前检查 Git 状态，不覆盖用户未提交改动。
+1. **Inspect**
+   - 读取看板、相关 Task/Evidence、Decision、活跃 Run/Lease、依赖和锁；编辑前检查 Git。
 
-2. **Triage**
-   - 确定任务类型、优先级、Area、运行模式、策略、通用模型请求、能力和验收表面。
-   - 根据命名合同生成 ID、`display_name`、Worker 名和标签。
+2. **Define**
+   - 确定类型、优先级、Area、策略、`reasoning_profile`、能力和验收表面。
+   - 按 Schema 定义用户路径、存量数据、运行形态、L0-L4、质量检查、停止条件和下一步。
+   - 分发前冻结范围、用户可见契约、安全约束和验收项并生成指纹。实现方式、文件布局、命令和普通测试失败不属于冻结设计变化。
 
-3. **Define**
-   - 按 Schema 创建或更新 `task.yaml` 与 `evidence.yaml`。
-   - 写清用户原始路径、存量数据、运行形态、测试数据、L0-L4 和停止条件。
+3. **Check safety**
+   - 批量或并行前运行全局 Validator；依赖异常、锁冲突、并发超限、Attempt/Lease 无效时只停止受影响的分发。
+   - 首次命令、构建或测试失败不是 Blocker。同一 Worker 先做一次同方法重试、最多两种不同恢复路径，再做一次聚焦复验；恢复期间保持同一 Attempt。
 
-4. **Check safety**
-   - 在批量或并行分发前运行 `--tasks-dir` 校验。
-   - 依赖未满足、存在依赖环、资源锁冲突、活跃 Run 超限或 Lease 无效时停止分发。
+4. **Dispatch**
+   - 运行 Resolver 生成 `resolution`；Task 不接受用户模型 ID。Codex 子 Worker 不传 `model`，跟随发布端的 Codex 默认模型配置；`reasoning_profile` 只映射思考强度。
+   - 用 Adapter v2 的 create/send/wait/rebind/collect 执行和续接；幂等键、Worker ID、token、cursor、Run/Attempt/Lease 和锁写入 Runtime，不得伪造 running。
+   - 默认使用用户可见 Worker；只有用户明确允许时使用内部 sub-agent。
+   - 分发任务线程每 10 分钟增量检查 Runtime 中的 Worker 状态、Lease、最新里程碑；仅在触发条件出现时全文收口，不得再创建独立监控 Worker/任务。
+   - 监控自身不可用时标记 `liveness_state=unknown`，保留 Attempt、Lease 所有权和资源锁；恢复后先 reconcile 原 Worker。只有 Provider 确认身份不可恢复且宽限复查失败才允许替换，避免重复分发。
+   - `single-worker` 的新 Run 和 Gate 默认沿用原 `worker_id`；换 Worker 必须记录允许的 `worker_replacement_reason`，普通 Gate 切换、补测试或补 Evidence 不是替换理由。
+   - 只有安全边界或受保护的冻结设计指纹变化时，取消当前 Attempt 并新建 Attempt；普通可恢复问题留在同一 Worker/Attempt 内修复。
 
-5. **Dispatch**
-   - 先用 Resolver 将 `model_request` 和能力要求解析为 `resolution`，不得由 AI 猜 Provider 参数。
-   - 用 `scripts/adapter_protocol.py` 从 Adapter 构建版本化操作 envelope；按 transport 执行后，从声明路径提取真实 `worker_id/status`。
-   - 按 Resolution 对应的 Provider Adapter 创建真实 Worker，并把真实 Worker ID 与实际模型参数写回 Run。
-   - 默认使用用户可见 Worker；只有用户明确允许时才使用内部 sub-agent。
-   - 创建 Attempt、Lease、必要资源锁和经授权的 Heartbeat。不得先写“running”再伪造 Worker ID。
+5. **Verify and close**
+   - 回收 commit、文件、命令、API、SQL、Browser、日志、质量检查和发布 Artifact；L0-L4 只能引用 Artifact ID。
+   - Validator 自动校验 required/conditional/skipped 质量检查及 Artifact，再更新 Gate；非终态失败留在原 Attempt 修复。
+   - 终态必须按 `references/closure.md` 主动报告状态、证据、缺口、用户动作、提交和唯一下一步。
 
-6. **Collect evidence**
-   - Worker 完成后回收 commit、文件、命令、API、SQL、Browser、截图、日志、ID、升级和发布证据。
-   - Evidence Artifact 必须包含来源、主体、结果、时间和稳定引用；L0-L4 引用必须解析到 Artifact ID。
+## Commands
 
-7. **Close**
-   - 先运行 validator，再更新 Gate。
-   - `CLOSED` 必须具有 verified-like Evidence、`lifecycle.phase=archive`、`closure.status=closed` 和完整接受时间。
-   - 失败项转成补证据、返修 Prompt、Blocker 或 PM Decision，不用绿色状态掩盖风险。
-
-## Gate Outcomes
-
-- `VERIFIED`：真实验收证据通过且无 open blocker。
-- `L*_VERIFIED_MOCK`：PM 明确接受 Mock fallback，Evidence 标注 `mock_based` 和 `accepted_fallback`。
-- `PARTIAL_VERIFIED`：部分证据通过但仍有明确缺口。
-- `ENV_BLOCKED`、`CONTRACT_BLOCKED`、`THREAD_BLOCKED`、`PM_BLOCKED`：对应阻塞必须同时存在于 Task 和 Evidence。
-
-UI/L3 必须有结构化 Browser Artifact；API/L2 必须有 API、SQL 或成功 Command Artifact；SQL、Migration 和 Release 必须有 Upgrade 或 Release Artifact。
-
-## Validation
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 scripts/resolve_pm_dispatch.py docs/tasks/BUG-041/task.yaml --write
-python3 scripts/adapter_protocol.py references/adapters/codex.adapter.json create --inputs '{"title":"BUG-041","prompt":"..."}'
-python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml
-python3 scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
-python3 scripts/migrate_pm_dispatch.py docs/tasks --write
-python3 scripts/render_task_panel.py --tasks-dir docs/tasks
-```
-
-Validator 失败时不要手工覆盖结论。修复 Task/Evidence，或记录真实 Blocker。
+按相关 reference 运行面板、Resolver、协议一致性检查和 Validator。失败时修复 Task/Evidence/Runtime/Automation，或记录真实 Blocker；不得手工覆盖结论。

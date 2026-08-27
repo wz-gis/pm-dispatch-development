@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,16 +31,10 @@ def worker_dispatch() -> dict:
         "provider_policy": {"mode": "pinned", "provider": "codex"},
         "required_capabilities": ["background-worker", "code-edit", "git", "heartbeat", "shell"],
         "required_evidence_kinds": ["command", "log"],
-        "model_request": {
-            "quality": "frontier",
-            "reasoning_profile": "deep",
-            "latency": "normal",
-            "cost": "balanced",
-        },
+        "reasoning_profile": "deep",
         "fallback_policy": {
             "mode": "strict",
             "allowed_providers": ["codex"],
-            "allow_model_substitution": False,
             "allow_manual_monitoring": False,
         },
         "heartbeat_required": True,
@@ -55,15 +51,39 @@ class ResolverCase(unittest.TestCase):
     def test_pinned_provider_resolves_generic_profile_to_provider_effort(self) -> None:
         resolution = self.resolver.resolve_dispatch(worker_dispatch(), self.adapters, NOW)
         self.assertEqual(resolution["provider"], "codex")
-        self.assertEqual(resolution["model_id"], "gpt-5.6-sol")
+        self.assertIsNone(resolution["model_id"])
         self.assertEqual(resolution["reasoning_profile"], "deep")
         self.assertEqual(resolution["provider_reasoning_effort"], "high")
         self.assertEqual(resolution["monitor_mode"], "heartbeat")
+        self.assertIn("heartbeat", resolution["capabilities"])
+        self.assertNotIn("lease-watchdog", resolution["capabilities"])
+        self.assertNotIn("terminal-event-wait", resolution["capabilities"])
+
+    def test_standard_profile_inherits_model_and_effort(self) -> None:
+        dispatch = worker_dispatch()
+        dispatch["reasoning_profile"] = "standard"
+        resolution = self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
+        self.assertIsNone(resolution["model_id"])
+        self.assertEqual(resolution["provider_reasoning_effort"], "inherit")
+
+    def test_dispatch_without_heartbeat_requirement_does_not_force_full_scan(self) -> None:
+        dispatch = worker_dispatch()
+        dispatch["heartbeat_required"] = False
+        dispatch["required_capabilities"].remove("heartbeat")
+        resolution = self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
+        self.assertEqual(resolution["monitor_mode"], "event-lease")
+
+    def test_critical_profile_inherits_model_with_high_effort(self) -> None:
+        dispatch = worker_dispatch()
+        dispatch["reasoning_profile"] = "critical"
+        resolution = self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
+        self.assertIsNone(resolution["model_id"])
+        self.assertEqual(resolution["provider_reasoning_effort"], "high")
 
     def test_missing_capability_fails_closed(self) -> None:
         dispatch = worker_dispatch()
         dispatch["required_capabilities"].append("gpu-cluster")
-        with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider/model"):
+        with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider"):
             self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
 
     def test_strict_policy_rejects_auto_provider(self) -> None:
@@ -75,17 +95,18 @@ class ResolverCase(unittest.TestCase):
     def test_compatible_policy_can_record_manual_monitor_fallback(self) -> None:
         external = copy.deepcopy(self.adapters["codex"])
         external.update({"provider": "external-cli", "worker_types": ["agent-thread"]})
+        external["components"].pop("model", None)
         external["components"]["worker"]["transport"] = "command"
         external["components"]["worker"]["create"]["target"] = "agent start --json"
         external["components"]["worker"]["inspect"]["target"] = "agent status --json"
         external["components"]["worker"]["cancel"]["target"] = "agent cancel --json"
         external["components"]["monitor"].update(
-            {"modes": ["manual"], "supports_lease_renewal": False}
+            {
+                "modes": ["manual"],
+                "supports_lease_renewal": False,
+                "event_wait_target": None,
+            }
         )
-        external["components"]["model"].update(
-            {"default_model": "external-frontier", "fallback_models": []}
-        )
-        external["models"][0].update({"id": "external-frontier", "aliases": []})
         dispatch = worker_dispatch()
         dispatch["provider_policy"] = {"mode": "auto", "provider": None}
         dispatch["fallback_policy"].update(
@@ -99,18 +120,19 @@ class ResolverCase(unittest.TestCase):
             dispatch, {"external-cli": external}, NOW
         )
         self.assertEqual(resolution["provider"], "external-cli")
+        self.assertIsNone(resolution["model_id"])
         self.assertEqual(resolution["monitor_mode"], "manual")
 
     def test_missing_reasoning_profile_mapping_fails_closed(self) -> None:
         adapter = copy.deepcopy(self.adapters["codex"])
-        adapter["models"][0]["reasoning_profiles"].pop("deep")
-        with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider/model"):
+        adapter["components"]["reasoning"]["profiles"].pop("deep")
+        with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider"):
             self.resolver.resolve_dispatch(worker_dispatch(), {"codex": adapter}, NOW)
 
     def test_unsupported_evidence_kind_fails_closed(self) -> None:
         dispatch = worker_dispatch()
         dispatch["required_evidence_kinds"].append("hardware-trace")
-        with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider/model"):
+        with self.assertRaisesRegex(self.resolver.ResolutionError, "no compatible provider"):
             self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
 
     def test_worker_request_rejects_empty_capability_or_evidence_contract(self) -> None:
@@ -144,33 +166,52 @@ class ResolverCase(unittest.TestCase):
         self.assertEqual(resolution["provider_reasoning_effort"], "deliberate")
         self.assertEqual(resolution["monitor_mode"], "poll")
 
-    def test_model_fallback_can_route_to_specialized_reasoning_model(self) -> None:
-        adapter = copy.deepcopy(self.adapters["codex"])
-        adapter["components"]["model"].update(
-            {"default_model": "fast-model", "fallback_models": ["deep-model"]}
-        )
-        adapter["models"] = [
-            {
-                "id": "fast-model",
-                "aliases": [],
-                "quality": "frontier",
-                "latency_class": "normal",
-                "cost_class": "balanced",
-                "reasoning_profiles": {"fast": "low", "standard": "medium"},
-            },
-            {
-                "id": "deep-model",
-                "aliases": [],
-                "quality": "frontier",
-                "latency_class": "normal",
-                "cost_class": "balanced",
-                "reasoning_profiles": {"deep": "high", "critical": "xhigh"},
-            },
-        ]
+    def test_provider_fallback_can_supply_reasoning_profile(self) -> None:
+        codex = copy.deepcopy(self.adapters["codex"])
+        codex["components"]["reasoning"]["profiles"].pop("deep")
+        external = copy.deepcopy(self.adapters["codex"])
+        external.update({"provider": "external-cli", "worker_types": ["agent-thread"]})
+        external["components"].pop("model", None)
         dispatch = worker_dispatch()
-        dispatch["fallback_policy"]["allow_model_substitution"] = True
-        resolution = self.resolver.resolve_dispatch(dispatch, {"codex": adapter}, NOW)
-        self.assertEqual(resolution["model_id"], "deep-model")
+        dispatch["fallback_policy"].update(
+            {"mode": "compatible", "allowed_providers": ["external-cli"]}
+        )
+        resolution = self.resolver.resolve_dispatch(
+            dispatch,
+            {"codex": codex, "external-cli": external},
+            NOW,
+        )
+        self.assertEqual(resolution["provider"], "external-cli")
+
+    def test_cli_writes_resolution_to_runtime_for_task_v4(self) -> None:
+        task = {
+            "schema_version": "4",
+            "id": "SPEC-042",
+            "runtime_file": "runtime.yaml",
+            "dispatch": worker_dispatch(),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.yaml"
+            path.write_text(json.dumps(task), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(RESOLVER_PATH),
+                    str(path),
+                    "--now",
+                    NOW,
+                    "--write",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            unchanged_task = json.loads(path.read_text(encoding="utf-8"))
+            runtime = json.loads((Path(tmp) / "runtime.yaml").read_text(encoding="utf-8"))
+            self.assertNotIn("resolution", unchanged_task["dispatch"])
+            self.assertEqual(runtime["resolution"]["provider"], "codex")
+            self.assertTrue((Path(tmp) / "events.jsonl").exists())
 
 
 if __name__ == "__main__":

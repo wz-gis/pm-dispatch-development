@@ -35,20 +35,57 @@ class AdapterContractCase(unittest.TestCase):
 
     def test_adapter_declares_four_component_contracts(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(adapter["components"]), {"worker", "model", "monitor", "evidence"})
+        self.assertEqual(
+            set(adapter["components"]),
+            {"worker", "reasoning", "monitor", "evidence"},
+        )
+        self.assertEqual(adapter["schema_version"], "3")
+        self.assertEqual(adapter["adapter_version"], "9")
         worker = adapter["components"]["worker"]
-        self.assertEqual(adapter["protocol_version"], "1")
+        self.assertEqual(adapter["protocol_version"], "2")
         self.assertIn(worker["transport"], {"tool", "command", "api", "manual"})
-        for operation in ("create", "inspect", "cancel"):
+        for operation in ("create", "send", "inspect", "wait", "rebind", "collect", "cancel"):
             self.assertTrue(worker[operation]["target"])
             self.assertTrue(worker[operation]["input_fields"])
-            self.assertTrue(worker[operation]["status_path"])
-        self.assertTrue(worker["create"]["worker_id_path"])
+            self.assertTrue(worker[operation]["result_paths"]["status"])
+        self.assertTrue(worker["create"]["result_paths"]["worker_id"])
+        self.assertEqual(worker["create"]["idempotency"], "required")
+        self.assertEqual(worker["send"]["idempotency"], "required")
+        self.assertEqual(worker["rebind"]["idempotency"], "optional")
+        self.assertTrue(adapter["status_map"])
 
     def test_adapter_maps_every_core_reasoning_profile(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
-        profiles = adapter["models"][0]["reasoning_profiles"]
+        profiles = adapter["components"]["reasoning"]["profiles"]
         self.assertEqual(set(profiles), {"fast", "standard", "deep", "critical"})
+        self.assertEqual(profiles["standard"], "inherit")
+        self.assertEqual(profiles["deep"], "high")
+        self.assertNotIn("model", adapter["components"])
+        self.assertNotIn("model", adapter["components"]["worker"]["create"]["input_fields"])
+        self.assertEqual(
+            adapter["components"]["worker"]["create"]["optional_input_fields"],
+            ["reasoning_effort"],
+        )
+        monitor = adapter["components"]["monitor"]
+        self.assertEqual(monitor["modes"][0], "heartbeat")
+        self.assertEqual(monitor["heartbeat_target"], "coordinator-thread")
+        self.assertIn("event-lease", monitor["modes"])
+        self.assertEqual(monitor["event_wait_target"], "wait_threads")
+        self.assertEqual(monitor["disconnect_probe_operation"], "inspect")
+
+    def test_event_lease_adapter_requires_wait_and_watchdog_capabilities(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["components"]["monitor"]["event_wait_target"] = None
+        adapter["capabilities"].remove("lease-watchdog")
+        errors = validator.validate_adapter_integrity(adapter, "adapter")
+        self.assertTrue(any("event_wait_target" in error for error in errors))
+        self.assertTrue(any("lease-watchdog" in error for error in errors))
+
+    def test_heartbeat_adapter_requires_coordinator_thread_target(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["components"]["monitor"].pop("heartbeat_target")
+        errors = validator.validate_adapter_integrity(adapter, "adapter")
+        self.assertTrue(any("heartbeat_target=coordinator-thread" in error for error in errors))
 
     def test_schema_rejects_adapter_without_version(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
@@ -56,25 +93,37 @@ class AdapterContractCase(unittest.TestCase):
         errors = validator.validate_schema(adapter, self.schema, "adapter", self.schema)
         self.assertTrue(any("adapter_version" in error for error in errors))
 
-    def test_adapter_integrity_rejects_unknown_default_and_duplicate_models(self) -> None:
+    def test_adapter_integrity_rejects_empty_reasoning_mapping(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
-        adapter["components"]["model"]["default_model"] = "missing-model"
-        adapter["models"].append(dict(adapter["models"][0]))
+        adapter["components"]["reasoning"]["profiles"] = {}
         errors = validator.validate_adapter_integrity(adapter, "adapter")
-        self.assertTrue(any("default_model" in error for error in errors))
-        self.assertTrue(any("duplicate model id" in error for error in errors))
+        self.assertTrue(any("reasoning component" in error for error in errors))
 
-    def test_specialized_model_may_support_subset_of_reasoning_profiles(self) -> None:
+    def test_provider_may_support_subset_of_reasoning_profiles(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
-        adapter["models"][0]["reasoning_profiles"] = {"fast": "low", "standard": "medium"}
+        adapter["components"]["reasoning"]["profiles"] = {
+            "fast": "max",
+            "standard": "max",
+        }
         errors = validator.validate_schema(adapter, self.schema, "adapter", self.schema)
         self.assertEqual(errors, [])
+
+    def test_schema_rejects_explicit_model_catalog(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["models"] = [{"id": "forbidden-model"}]
+        errors = validator.validate_schema(adapter, self.schema, "adapter", self.schema)
+        self.assertTrue(
+            any(
+                ".models: additional property is not allowed" in error
+                for error in errors
+            )
+        )
 
     def test_malformed_adapter_stops_after_schema_validation(self) -> None:
         malformed = json.loads(
             (ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8")
         )
-        malformed["models"] = ["not-an-object"]
+        malformed["components"]["reasoning"] = ["not-an-object"]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "malformed.adapter.json"
             path.write_text(json.dumps(malformed), encoding="utf-8")

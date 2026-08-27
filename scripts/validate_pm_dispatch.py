@@ -9,9 +9,12 @@ produced by this skill.
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +23,8 @@ from typing import Any
 
 ACTIVE_RUN_STATUSES = {"queued", "running"}
 ACTIVE_LOCK_STATUSES = {"active"}
+HEARTBEAT_PROMPT_MAX_CHARS = 240
+COORDINATOR_HEARTBEAT_INTERVAL_MINUTES = 10
 VERIFIED_STATUSES = {
     "VERIFIED",
     "L0_VERIFIED_MOCK",
@@ -116,18 +121,13 @@ OPEN_CLOSURE_STATUSES = {
     "READY_FOR_INTEGRATION",
     "IN_INTEGRATION",
 } | BLOCKED_STATUSES
-QUALITY_RANK = {"fast": 0, "balanced": 1, "frontier": 2}
-LATENCY_RANK = {"low": 0, "normal": 1, "high": 2}
-COST_RANK = {"economical": 0, "balanced": 1, "premium": 2}
-REQUEST_LATENCY_MAX = {"low": 0, "normal": 1, "relaxed": 2}
-REQUEST_COST_MAX = {"economical": 0, "balanced": 1, "unbounded": 2}
-
-
 @dataclass
 class LoadedTask:
     path: Path
     task: dict[str, Any]
     evidence: dict[str, Any] | None
+    runtime_path: Path | None = None
+    runtime: dict[str, Any] | None = None
 
 
 def main() -> int:
@@ -135,8 +135,13 @@ def main() -> int:
     parser.add_argument("task", nargs="?", help="Path to one docs/tasks/<TASK>/task.yaml")
     parser.add_argument("--tasks-dir", help="Validate every */task.yaml in this docs/tasks directory")
     parser.add_argument("--evidence", help="Override evidence.yaml path for single-task validation")
+    parser.add_argument("--runtime", help="Override runtime.yaml path for single-task validation")
     parser.add_argument("--schema-dir", help="Directory containing task.schema.json and evidence.schema.json")
     parser.add_argument("--adapter-dir", help="Directory containing *.adapter.json provider policies")
+    parser.add_argument(
+        "--automation-dir",
+        help="Optional Codex automations directory used to verify Heartbeat schedule/status drift",
+    )
     parser.add_argument("--now", help="Override current time, ISO-8601. Defaults to current UTC time")
     args = parser.parse_args()
 
@@ -146,11 +151,16 @@ def main() -> int:
     script_dir = Path(__file__).resolve().parent
     schema_dir = Path(args.schema_dir).resolve() if args.schema_dir else script_dir.parent / "references" / "schemas"
     adapter_dir = Path(args.adapter_dir).resolve() if args.adapter_dir else script_dir.parent / "references" / "adapters"
+    automation_dir = Path(args.automation_dir).resolve() if args.automation_dir else None
     task_schema = load_structured_file(schema_dir / "task.schema.json")
     evidence_schema = load_structured_file(schema_dir / "evidence.schema.json")
+    runtime_schema = load_structured_file(schema_dir / "runtime.schema.json")
+    runtime_event_schema = load_structured_file(schema_dir / "runtime-event.schema.json")
     adapter_schema = load_structured_file(schema_dir / "adapter.schema.json")
     assert_supported_schema(task_schema, "task.schema.json")
     assert_supported_schema(evidence_schema, "evidence.schema.json")
+    assert_supported_schema(runtime_schema, "runtime.schema.json")
+    assert_supported_schema(runtime_event_schema, "runtime-event.schema.json")
     assert_supported_schema(adapter_schema, "adapter.schema.json")
     adapters, adapter_errors = load_adapters(adapter_dir, adapter_schema)
     now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
@@ -172,6 +182,39 @@ def main() -> int:
         if task_schema_errors:
             continue
 
+        runtime_path = None
+        runtime = None
+        layout_errors: list[str] = []
+        if task.get("schema_version") == "4":
+            runtime_path = runtime_file_for(
+                task_path,
+                task,
+                args.runtime if len(task_paths) == 1 else None,
+            )
+            if runtime_path is None:
+                layout_errors.append(f"{task_path}: Task v4 requires runtime_file")
+            elif runtime_path.exists():
+                try:
+                    runtime = load_structured_file(runtime_path)
+                    runtime_errors = validate_schema(
+                        runtime, runtime_schema, str(runtime_path), runtime_schema
+                    )
+                    errors.extend(runtime_errors)
+                    if runtime_errors:
+                        runtime = None
+                    else:
+                        event_errors = validate_runtime_event_log(
+                            runtime_path, runtime, runtime_event_schema
+                        )
+                        errors.extend(event_errors)
+                except Exception as exc:
+                    errors.append(f"{runtime_path}: cannot load runtime: {exc}")
+            else:
+                layout_errors.append(f"{task_path}: Task v4 requires runtime file {runtime_path}")
+        layout_errors.extend(validate_task_runtime_layout(task, runtime, str(task_path)))
+        errors.extend(layout_errors)
+        effective_task = compose_task_runtime(task, runtime)
+
         evidence_path = evidence_file_for(task_path, task, args.evidence if len(task_paths) == 1 else None)
         evidence = None
         if evidence_path.exists():
@@ -188,10 +231,12 @@ def main() -> int:
         elif task.get("status") in EVIDENCE_REQUIRED_STATUSES:
             errors.append(f"{task_path}: status {task.get('status')} requires evidence file {evidence_path}")
 
-        loaded.append(LoadedTask(task_path, task, evidence))
+        loaded.append(LoadedTask(task_path, effective_task, evidence, runtime_path, runtime))
 
     for item in loaded:
-        item_errors, item_warnings = validate_gate_policy(item, now, adapters)
+        item_errors, item_warnings = validate_gate_policy(
+            item, now, adapters, automation_dir
+        )
         errors.extend(item_errors)
         warnings.extend(item_warnings)
 
@@ -219,8 +264,127 @@ def evidence_file_for(task_path: Path, task: dict[str, Any], override: str | Non
     return task_path.with_name("evidence.yaml")
 
 
+def runtime_file_for(
+    task_path: Path, task: dict[str, Any], override: str | None
+) -> Path | None:
+    if override:
+        return Path(override).resolve()
+    configured = task.get("runtime_file")
+    if not configured:
+        return None
+    path = Path(str(configured))
+    return path if path.is_absolute() else (task_path.parent / path).resolve()
+
+
+def validate_task_runtime_layout(
+    task: dict[str, Any], runtime: dict[str, Any] | None, prefix: str
+) -> list[str]:
+    errors: list[str] = []
+    version = task.get("schema_version")
+    dispatch = task.get("dispatch") or {}
+    runtime_dispatch_fields = {"selected_at", "resolution", "heartbeat"}
+    if version == "3":
+        if task.get("runtime_file"):
+            errors.append(f"{prefix}: Task v3 cannot reference a Runtime sidecar")
+        for field in ("resources", "runs"):
+            if field not in task:
+                errors.append(f"{prefix}: legacy Task v3 requires embedded {field}")
+        for field in sorted(runtime_dispatch_fields):
+            if field not in dispatch:
+                errors.append(f"{prefix}: legacy Task v3 requires dispatch.{field}")
+        return errors
+    if version != "4":
+        return errors
+
+    if not task.get("runtime_file"):
+        errors.append(f"{prefix}: Task v4 requires runtime_file")
+    for field in ("resources", "runs"):
+        if field in task:
+            errors.append(f"{prefix}: Task v4 keeps {field} in Runtime, not task.yaml")
+    for field in sorted(runtime_dispatch_fields):
+        if field in dispatch:
+            errors.append(
+                f"{prefix}: Task v4 keeps dispatch.{field} in Runtime, not task.yaml"
+            )
+    if runtime:
+        if runtime.get("task_id") != task.get("id"):
+            errors.append(
+                f"{prefix}: Runtime task_id {runtime.get('task_id')!r} "
+                f"does not match {task.get('id')!r}"
+            )
+        if runtime.get("task_schema_version") != "4":
+            errors.append(f"{prefix}: Runtime must bind task_schema_version=4")
+    return errors
+
+
+def compose_task_runtime(
+    task: dict[str, Any], runtime: dict[str, Any] | None
+) -> dict[str, Any]:
+    if task.get("schema_version") != "4":
+        return task
+    effective = copy.deepcopy(task)
+    effective_dispatch = effective.setdefault("dispatch", {})
+    effective_dispatch["selected_at"] = runtime.get("selected_at") if runtime else None
+    effective_dispatch["resolution"] = runtime.get("resolution") if runtime else None
+    effective_dispatch["heartbeat"] = runtime.get("heartbeat") if runtime else None
+    effective["resources"] = copy.deepcopy(
+        runtime.get("resources") if runtime else {"locks": []}
+    )
+    effective["runs"] = copy.deepcopy(runtime.get("runs") if runtime else [])
+    return effective
+
+
+def validate_runtime_event_log(
+    runtime_path: Path,
+    runtime: dict[str, Any],
+    event_schema: dict[str, Any],
+) -> list[str]:
+    configured = runtime.get("event_log_file")
+    if not configured:
+        return [f"{runtime_path}: Runtime requires event_log_file"]
+    event_path = Path(str(configured))
+    if not event_path.is_absolute():
+        event_path = (runtime_path.parent / event_path).resolve()
+    if not event_path.exists():
+        return [f"{runtime_path}: event log does not exist: {event_path}"]
+
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+    previous_time: datetime | None = None
+    for lineno, raw_line in enumerate(event_path.read_text(encoding="utf-8").splitlines(), 1):
+        if not raw_line.strip():
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{event_path}:{lineno}: invalid JSON event: {exc}")
+            continue
+        errors.extend(
+            validate_schema(event, event_schema, f"{event_path}:{lineno}", event_schema)
+        )
+        event_id = event.get("event_id")
+        if event_id in seen_ids:
+            errors.append(f"{event_path}:{lineno}: duplicate event_id {event_id!r}")
+        seen_ids.add(event_id)
+        if event.get("task_id") != runtime.get("task_id"):
+            errors.append(
+                f"{event_path}:{lineno}: task_id does not match Runtime task_id"
+            )
+        try:
+            occurred_at = parse_time(event.get("occurred_at"))
+        except ValueError:
+            continue
+        if previous_time and occurred_at < previous_time:
+            errors.append(f"{event_path}:{lineno}: events must be time ordered")
+        previous_time = occurred_at
+    return errors
+
+
 def validate_gate_policy(
-    item: LoadedTask, now: datetime, adapters: dict[str, dict[str, Any]]
+    item: LoadedTask,
+    now: datetime,
+    adapters: dict[str, dict[str, Any]],
+    automation_dir: Path | None = None,
 ) -> tuple[list[str], list[str]]:
     task = item.task
     evidence = item.evidence
@@ -281,6 +445,17 @@ def validate_gate_policy(
             errors.append(f"{prefix}: blocked status {status} requires verification.status=BLOCKED")
         if not open_blockers:
             errors.append(f"{prefix}: blocked status {status} requires an open blocker")
+        hard_blockers = [blocker for blocker in open_blockers if blocker.get("hard") is True]
+        if open_blockers and not hard_blockers:
+            errors.append(f"{prefix}: blocked status {status} requires an open hard blocker")
+        for blocker in hard_blockers:
+            cause = blocker.get("cause")
+            attempts = int(blocker.get("recovery_attempts") or 0)
+            if cause in {"external-unavailable", "recovery-exhausted"} and attempts < 2:
+                errors.append(
+                    f"{prefix}: hard blocker {blocker.get('id')} with cause={cause} "
+                    "requires at least two materially different recovery attempts"
+                )
         expected_blocker_type = BLOCKER_TYPE_BY_STATUS.get(str(status))
         if expected_blocker_type and not any(blocker.get("type") == expected_blocker_type for blocker in open_blockers):
             errors.append(f"{prefix}: status {status} requires an open {expected_blocker_type} blocker")
@@ -361,8 +536,20 @@ def validate_gate_policy(
             if lease.get("holder") != run_id:
                 errors.append(f"{prefix}: active run {run_id} lease holder must equal run_id")
             expires_at = parse_time(lease.get("expires_at"))
-            if expires_at <= now:
+            liveness_state = lease.get("liveness_state")
+            monitor_gap_started_at = lease.get("monitor_gap_started_at")
+            if expires_at <= now and liveness_state != "unknown":
                 errors.append(f"{prefix}: active run {run.get('run_id')} lease expired at {lease.get('expires_at')}")
+            if liveness_state == "unknown" and not monitor_gap_started_at:
+                errors.append(
+                    f"{prefix}: active run {run.get('run_id')} with unknown liveness "
+                    "requires monitor_gap_started_at"
+                )
+            if liveness_state == "live" and monitor_gap_started_at is not None:
+                errors.append(
+                    f"{prefix}: active run {run.get('run_id')} with live liveness "
+                    "must clear monitor_gap_started_at"
+                )
             acquired_at = parse_time(lease.get("acquired_at"))
             if acquired_at >= expires_at:
                 errors.append(f"{prefix}: active run {run_id} lease expires before it was acquired")
@@ -393,18 +580,76 @@ def validate_gate_policy(
         errors.append(f"{prefix}: dispatch.strategy=direct requires required_capabilities=[]")
     if strategy == "direct" and dispatch.get("required_evidence_kinds"):
         errors.append(f"{prefix}: dispatch.strategy=direct requires required_evidence_kinds=[]")
-    if strategy == "direct" and dispatch.get("model_request") is not None:
-        errors.append(f"{prefix}: dispatch.strategy=direct requires model_request=null")
+    if strategy == "direct" and dispatch.get("reasoning_profile") is not None:
+        errors.append(f"{prefix}: dispatch.strategy=direct requires reasoning_profile=null")
     if strategy == "direct" and dispatch.get("fallback_policy") is not None:
         errors.append(f"{prefix}: dispatch.strategy=direct requires fallback_policy=null")
     if strategy == "direct" and dispatch.get("resolution") is not None:
         errors.append(f"{prefix}: dispatch.strategy=direct requires resolution=null")
+    if strategy == "direct" and dispatch.get("design_freeze") is not None:
+        errors.append(f"{prefix}: dispatch.strategy=direct requires design_freeze=null")
     if strategy == "direct" and dispatch.get("heartbeat") is not None:
         errors.append(f"{prefix}: dispatch.strategy=direct requires heartbeat=null")
+    if strategy == "direct" and dispatch.get("worker_reuse") is not None:
+        errors.append(f"{prefix}: dispatch.strategy=direct requires worker_reuse=null")
     if strategy == "single-worker" and len(active_runs) > 1:
         errors.append(f"{prefix}: dispatch.strategy=single-worker allows at most one active run")
+    if strategy == "single-worker":
+        reuse = dispatch.get("worker_reuse") or {}
+        if reuse.get("mode") != "sticky" or reuse.get("reuse_across_gates") is not True:
+            errors.append(
+                f"{prefix}: dispatch.strategy=single-worker requires sticky reuse across gates"
+            )
+        allowed_replacements = set(reuse.get("replacement_triggers") or [])
+        previous_worker_id: str | None = None
+        runs_per_worker: dict[str, int] = {}
+        for run in task.get("runs", []):
+            worker_id = str(run.get("worker_id") or "")
+            if not worker_id:
+                continue
+            replacement_reason = run.get("worker_replacement_reason")
+            if previous_worker_id and worker_id != previous_worker_id:
+                if replacement_reason == "legacy-history" and run.get("status") in TERMINAL_RUN_STATUSES:
+                    pass
+                elif replacement_reason not in allowed_replacements:
+                    errors.append(
+                        f"{prefix}: single-worker changed Worker from {previous_worker_id} "
+                        f"to {worker_id} without an allowed worker_replacement_reason"
+                    )
+            elif replacement_reason is not None:
+                errors.append(
+                    f"{prefix}: single-worker run {run.get('run_id')} declares "
+                    "worker_replacement_reason without changing Worker"
+                )
+            previous_worker_id = worker_id
+            runs_per_worker[worker_id] = runs_per_worker.get(worker_id, 0) + 1
+        max_reused_runs = reuse.get("max_runs_per_worker")
+        if isinstance(max_reused_runs, int):
+            for worker_id, count in runs_per_worker.items():
+                if count > max_reused_runs:
+                    errors.append(
+                        f"{prefix}: sticky Worker {worker_id} has {count} Runs; "
+                        f"max_runs_per_worker={max_reused_runs}"
+                    )
     if strategy in {"single-worker", "batch-worker", "full-dispatch"} and dispatch.get("worker_required") is not True:
         errors.append(f"{prefix}: dispatch.strategy={strategy} requires worker_required=true")
+    if strategy in {"single-worker", "batch-worker", "full-dispatch"}:
+        if not dispatch.get("worker_reuse"):
+            errors.append(f"{prefix}: dispatch.strategy={strategy} requires dispatch.worker_reuse")
+        freeze = dispatch.get("design_freeze") or {}
+        if freeze.get("status") != "frozen":
+            errors.append(f"{prefix}: dispatch.strategy={strategy} requires a frozen design before dispatch")
+        elif not freeze.get("frozen_at") or not freeze.get("fingerprint"):
+            errors.append(f"{prefix}: frozen design requires frozen_at and fingerprint")
+        elif freeze.get("fingerprint") != design_freeze_fingerprint(freeze):
+            errors.append(f"{prefix}: design_freeze fingerprint does not match frozen constraints")
+        active_fingerprint = freeze.get("fingerprint")
+        for run in active_runs:
+            if run.get("design_fingerprint") != active_fingerprint:
+                errors.append(
+                    f"{prefix}: active run {run.get('run_id')} design_fingerprint differs "
+                    "from the protected dispatch.design_freeze contract; a new Attempt is required"
+                )
     if status in {"IN_IMPL", "IN_INTEGRATION"} and strategy != "direct" and not task.get("runs"):
         errors.append(f"{prefix}: dispatch.strategy={strategy} in status {status} requires at least one run")
     max_parallel = dispatch.get("max_parallel_workers")
@@ -417,13 +662,98 @@ def validate_gate_policy(
             )
     heartbeat_required = dispatch.get("heartbeat_required")
     resolved_monitor = (dispatch.get("resolution") or {}).get("monitor_mode")
+    if resolved_monitor == "event-lease":
+        for run in active_runs:
+            lease = latest_lease(run) or {}
+            heartbeat_at = lease.get("heartbeat_at")
+            if not heartbeat_at:
+                errors.append(
+                    f"{prefix}: event-lease run {run.get('run_id')} requires lease.heartbeat_at"
+                )
+                continue
+            acquired_at = parse_time(lease.get("acquired_at"))
+            progress_at = parse_time(heartbeat_at)
+            expires_at = parse_time(lease.get("expires_at"))
+            if progress_at < acquired_at or progress_at > expires_at:
+                errors.append(
+                    f"{prefix}: event-lease run {run.get('run_id')} heartbeat_at must be within its Lease"
+                )
+            last_progress_at = lease.get("last_progress_at")
+            if not last_progress_at or not lease.get("last_progress_summary"):
+                errors.append(
+                    f"{prefix}: event-lease run {run.get('run_id')} requires a persisted progress checkpoint"
+                )
+            else:
+                checkpoint_at = parse_time(last_progress_at)
+                if checkpoint_at < acquired_at or checkpoint_at > expires_at:
+                    errors.append(
+                        f"{prefix}: event-lease run {run.get('run_id')} last_progress_at must be within its Lease"
+                    )
     if heartbeat_required and resolved_monitor == "heartbeat" and not dispatch.get("heartbeat"):
         errors.append(f"{prefix}: heartbeat_required=true requires heartbeat metadata")
     if (not heartbeat_required or resolved_monitor not in {None, "heartbeat"}) and dispatch.get("heartbeat"):
         errors.append(f"{prefix}: heartbeat metadata requires heartbeat_required=true")
     heartbeat = dispatch.get("heartbeat")
-    if heartbeat and not active_runs and heartbeat.get("status") == "active":
-        errors.append(f"{prefix}: heartbeat must be stopped or paused when no active runs remain")
+    if heartbeat:
+        heartbeat_status = heartbeat.get("status")
+        target_run_id = heartbeat.get("target_run_id")
+        runs_by_id = {run.get("run_id"): run for run in task.get("runs", [])}
+        target_run = runs_by_id.get(target_run_id)
+        if heartbeat.get("scan_scope") != "incremental":
+            errors.append(f"{prefix}: heartbeat must use scan_scope=incremental")
+        if heartbeat.get("lightweight") is not True:
+            errors.append(f"{prefix}: incremental heartbeat inspection requires lightweight=true")
+        if set(heartbeat.get("read_set") or []) != {
+            "worker-status",
+            "lease",
+            "latest-milestone",
+        }:
+            errors.append(
+                f"{prefix}: incremental heartbeat read_set must contain only Worker status, "
+                "Lease, and latest milestone"
+            )
+        if set(heartbeat.get("full_scan_triggers") or []) != {
+            "milestone",
+            "terminal",
+            "safety-boundary-change",
+            "design-freeze-change",
+        }:
+            errors.append(f"{prefix}: heartbeat full_scan_triggers do not match the protected contract")
+        if heartbeat.get("context_policy") != "coordinator":
+            errors.append(f"{prefix}: heartbeat must run in the dispatch coordinator thread")
+        if heartbeat.get("interval_minutes") != COORDINATOR_HEARTBEAT_INTERVAL_MINUTES:
+            errors.append(
+                f"{prefix}: incremental heartbeat inspection interval must equal "
+                f"{COORDINATOR_HEARTBEAT_INTERVAL_MINUTES} minutes"
+            )
+        if not target_run:
+            errors.append(f"{prefix}: heartbeat.target_run_id must reference a Run in this task")
+        elif heartbeat_status == "active" and target_run.get("status") not in ACTIVE_RUN_STATUSES:
+            errors.append(f"{prefix}: active heartbeat must target an active Run")
+        worker_ids = {str(run.get("worker_id")) for run in task.get("runs", []) if run.get("worker_id")}
+        coordinator_thread_id = str(heartbeat.get("coordinator_thread_id") or "")
+        if not coordinator_thread_id:
+            errors.append(f"{prefix}: heartbeat requires the PM coordinator_thread_id")
+        if coordinator_thread_id in worker_ids:
+            errors.append(
+                f"{prefix}: heartbeat coordinator_thread_id must differ from every Worker thread"
+            )
+        if (
+            active_runs
+            and heartbeat_required
+            and resolved_monitor == "heartbeat"
+            and heartbeat_status != "active"
+        ):
+            errors.append(f"{prefix}: active runs require heartbeat.status=active")
+        if not active_runs and heartbeat_status == "active":
+            errors.append(f"{prefix}: heartbeat must be stopped or paused when no active runs remain")
+        if automation_dir and (dispatch.get("resolution") or {}).get("provider") == "codex":
+            validate_codex_heartbeat_automation(
+                heartbeat,
+                automation_dir,
+                errors,
+                prefix,
+            )
     for run in task.get("runs", []):
         worker_name = str(run.get("worker_name") or "")
         if not worker_name:
@@ -438,10 +768,10 @@ def validate_gate_policy(
             errors.append(f"{prefix}: dispatch.strategy={strategy} requires required_capabilities")
         if not dispatch.get("required_evidence_kinds"):
             errors.append(f"{prefix}: dispatch.strategy={strategy} requires required_evidence_kinds")
-        for field in ("model_request", "fallback_policy", "resolution"):
+        for field in ("reasoning_profile", "fallback_policy", "resolution"):
             if not dispatch.get(field):
                 errors.append(f"{prefix}: dispatch.strategy={strategy} requires dispatch.{field}")
-        if all(dispatch.get(field) for field in ("model_request", "fallback_policy", "resolution")):
+        if all(dispatch.get(field) for field in ("reasoning_profile", "fallback_policy", "resolution")):
             validate_adapter_resolution(task, adapters, errors, prefix)
 
     batch = dispatch.get("batch")
@@ -487,6 +817,16 @@ def validate_gate_policy(
     levels = evidence.get("verification", {}).get("levels", {})
     artifacts = evidence.get("artifacts", {})
     artifact_index = validate_artifacts(artifacts, errors, prefix)
+    surfaces = [s.lower() for s in evidence.get("verification", {}).get("changed_surface", [])]
+    validate_quality_checks(
+        task.get("quality_checks", {}),
+        evidence.get("quality_checks", []),
+        surfaces,
+        artifact_index,
+        enforce_verification,
+        errors,
+        prefix,
+    )
     if enforce_verification:
         for level in required_levels:
             level_data = levels.get(level, {})
@@ -503,7 +843,6 @@ def validate_gate_policy(
                     errors.append(
                         f"{prefix}: {level} references non-passing artifact {evidence_ref!r}"
                     )
-    surfaces = [s.lower() for s in evidence.get("verification", {}).get("changed_surface", [])]
     needs_l2 = "L2" in required_levels or any(matches_any(s, ["api", "dto", "status", "async", "service"]) for s in surfaces)
     needs_l3 = "L3" in required_levels or any(matches_any(s, ["ui", "page", "button", "tab", "modal", "route", "browser"]) for s in surfaces)
     needs_release = any(matches_any(s, ["sql", "schema", "migration", "startup", "package", "release", "static"]) for s in surfaces)
@@ -641,7 +980,7 @@ def validate_adapter_resolution(
 ) -> None:
     dispatch = task.get("dispatch", {})
     provider_policy = dispatch.get("provider_policy") or {}
-    request = dispatch.get("model_request") or {}
+    profile = dispatch.get("reasoning_profile")
     fallback = dispatch.get("fallback_policy") or {}
     resolution = dispatch.get("resolution") or {}
     provider = resolution.get("provider")
@@ -675,12 +1014,12 @@ def validate_adapter_resolution(
     required_capabilities = set(dispatch.get("required_capabilities", []))
     resolved_capabilities = set(resolution.get("capabilities", []))
     effective_required = set(required_capabilities)
-    manual_fallback = (
-        resolution.get("monitor_mode") == "manual"
+    non_heartbeat_monitor = (
+        resolution.get("monitor_mode") in {"manual", "milestone", "event-lease"}
         and fallback.get("mode") == "compatible"
         and fallback.get("allow_manual_monitoring")
     )
-    if manual_fallback:
+    if resolution.get("monitor_mode") in {"milestone", "event-lease"} or non_heartbeat_monitor:
         effective_required.discard("heartbeat")
     missing = effective_required - adapter_capabilities
     if missing:
@@ -703,34 +1042,25 @@ def validate_adapter_resolution(
     if not resolved_evidence.issubset(adapter_evidence):
         errors.append(f"{prefix}: resolution claims evidence kinds not declared by provider adapter")
 
-    model_id = resolution.get("model_id")
-    model = next((candidate for candidate in adapter.get("models", []) if candidate.get("id") == model_id), None)
-    if not model:
-        errors.append(f"{prefix}: provider {provider!r} does not declare model_id={model_id!r}")
-        return
-    requested_quality = request.get("quality")
-    model_quality = QUALITY_RANK.get(model.get("quality"), -1)
-    required_quality = QUALITY_RANK.get(requested_quality, -1)
-    if requested_quality != "any" and model_quality < required_quality:
-        errors.append(
-            f"{prefix}: model {model_id!r} quality={model.get('quality')!r} does not satisfy request {requested_quality!r}"
-        )
-    model_latency = LATENCY_RANK.get(model.get("latency_class"), 99)
-    if model_latency > REQUEST_LATENCY_MAX.get(request.get("latency"), -1):
-        errors.append(f"{prefix}: model {model_id!r} does not satisfy latency request")
-    model_cost = COST_RANK.get(model.get("cost_class"), 99)
-    if model_cost > REQUEST_COST_MAX.get(request.get("cost"), -1):
-        errors.append(f"{prefix}: model {model_id!r} does not satisfy cost request")
-    if fallback.get("mode") == "strict" and not fallback.get("allow_model_substitution"):
-        default_model = adapter.get("components", {}).get("model", {}).get("default_model")
-        if model_id != default_model:
-            errors.append(f"{prefix}: strict model policy requires default_model={default_model!r}")
-    profile = request.get("reasoning_profile")
     if resolution.get("reasoning_profile") != profile:
-        errors.append(f"{prefix}: resolution reasoning_profile differs from model_request")
-    expected_effort = model.get("reasoning_profiles", {}).get(profile)
+        errors.append(f"{prefix}: resolution reasoning_profile differs from dispatch")
+    components = adapter.get("components", {})
+    model_component = components.get("model")
+    model_route = (model_component or {}).get("profiles", {}).get(profile)
+    if model_component:
+        if not model_route:
+            errors.append(f"{prefix}: provider {provider!r} does not map model route for reasoning_profile={profile!r}")
+            expected_effort = None
+        else:
+            if resolution.get("model_id") != model_route.get("model_id"):
+                errors.append(f"{prefix}: resolution model_id differs from adapter model route")
+            expected_effort = model_route.get("reasoning_effort")
+    else:
+        if resolution.get("model_id") is not None:
+            errors.append(f"{prefix}: provider {provider!r} does not declare model routing")
+        expected_effort = components.get("reasoning", {}).get("profiles", {}).get(profile)
     if not expected_effort:
-        errors.append(f"{prefix}: model {model_id!r} does not map reasoning_profile={profile!r}")
+        errors.append(f"{prefix}: provider {provider!r} does not map reasoning_profile={profile!r}")
     elif resolution.get("provider_reasoning_effort") != expected_effort:
         errors.append(f"{prefix}: resolution provider_reasoning_effort differs from adapter mapping")
 
@@ -738,12 +1068,26 @@ def validate_adapter_resolution(
     monitor_mode = resolution.get("monitor_mode")
     if monitor_mode not in monitor_modes:
         errors.append(f"{prefix}: provider {provider!r} does not support monitor_mode={monitor_mode!r}")
-    if dispatch.get("heartbeat_required") and monitor_mode != "heartbeat":
+    monitor = adapter.get("components", {}).get("monitor", {})
+    if monitor_mode == "event-lease":
+        if not monitor.get("supports_lease_renewal"):
+            errors.append(f"{prefix}: event-lease monitoring requires lease renewal support")
+        if not monitor.get("event_wait_target"):
+            errors.append(f"{prefix}: event-lease monitoring requires an event_wait_target")
+        event_capabilities = {"lease-watchdog", "terminal-event-wait"}
+        if not event_capabilities.issubset(adapter_capabilities):
+            errors.append(
+                f"{prefix}: event-lease monitoring requires adapter capabilities: "
+                f"{', '.join(sorted(event_capabilities))}"
+            )
+    if dispatch.get("heartbeat_required") and monitor_mode not in {"event-lease", "milestone", "heartbeat"}:
         manual_allowed = fallback.get("mode") == "compatible" and fallback.get("allow_manual_monitoring")
         if not (manual_allowed and monitor_mode == "manual"):
-            errors.append(f"{prefix}: heartbeat monitoring was downgraded without compatible manual fallback")
+            errors.append(f"{prefix}: background monitoring was downgraded without compatible manual fallback")
 
     for run in task.get("runs", []):
+        if run.get("status") not in ACTIVE_RUN_STATUSES:
+            continue
         fields = {
             "provider": "provider",
             "adapter_version": "adapter_version",
@@ -791,6 +1135,113 @@ def validate_artifacts(
     return artifact_index
 
 
+def validate_quality_checks(
+    task_quality: dict[str, Any],
+    evidence_quality: list[dict[str, Any]],
+    changed_surfaces: list[str],
+    artifact_index: dict[str, dict[str, Any]],
+    enforce_gate: bool,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    task_checks: dict[str, dict[str, Any]] = {}
+    for check in task_quality.get("checks", []):
+        check_id = str(check.get("id") or "")
+        if check_id in task_checks:
+            errors.append(f"{prefix}: duplicate Task quality check {check_id!r}")
+            continue
+        task_checks[check_id] = check
+        if check.get("requirement") == "conditional" and not check.get(
+            "when_changed_surface"
+        ):
+            errors.append(
+                f"{prefix}: conditional quality check {check_id!r} requires when_changed_surface"
+            )
+
+    evidence_checks: dict[str, dict[str, Any]] = {}
+    for check in evidence_quality:
+        check_id = str(check.get("id") or "")
+        if check_id in evidence_checks:
+            errors.append(f"{prefix}: duplicate Evidence quality check {check_id!r}")
+            continue
+        evidence_checks[check_id] = check
+        if check_id not in task_checks:
+            errors.append(
+                f"{prefix}: Evidence quality check {check_id!r} is not declared by Task"
+            )
+
+    required_ids: set[str] = set()
+    for check_id, task_check in task_checks.items():
+        requirement = task_check.get("requirement")
+        patterns = [
+            str(pattern).lower()
+            for pattern in task_check.get("when_changed_surface", [])
+        ]
+        triggered = any(
+            matches_any(surface, patterns) for surface in changed_surfaces
+        )
+        required = requirement == "required" or (
+            requirement == "conditional" and triggered
+        )
+        if required:
+            required_ids.add(check_id)
+
+        result = evidence_checks.get(check_id)
+        if not result:
+            if enforce_gate and required:
+                errors.append(f"{prefix}: required quality check {check_id!r} is missing")
+            continue
+
+        result_status = result.get("status")
+        if result_status == "passed":
+            refs = result.get("evidence_refs") or []
+            if not refs:
+                errors.append(
+                    f"{prefix}: passed quality check {check_id!r} requires evidence_refs"
+                )
+            if not result.get("tool") or not result.get("checked_at"):
+                errors.append(
+                    f"{prefix}: passed quality check {check_id!r} requires tool and checked_at"
+                )
+            allowed_kinds = set(task_check.get("evidence_kinds") or [])
+            for evidence_ref in refs:
+                artifact = artifact_index.get(str(evidence_ref))
+                if not artifact:
+                    errors.append(
+                        f"{prefix}: quality check {check_id!r} evidence_ref "
+                        f"{evidence_ref!r} does not match an artifact_id"
+                    )
+                elif artifact.get("result") != "pass":
+                    errors.append(
+                        f"{prefix}: quality check {check_id!r} references "
+                        f"non-passing artifact {evidence_ref!r}"
+                    )
+                elif artifact.get("kind") not in allowed_kinds:
+                    errors.append(
+                        f"{prefix}: quality check {check_id!r} artifact {evidence_ref!r} "
+                        f"uses kind={artifact.get('kind')!r}, expected one of "
+                        f"{sorted(allowed_kinds)}"
+                    )
+        elif result_status == "skipped":
+            if not result.get("skip_reason"):
+                errors.append(
+                    f"{prefix}: skipped quality check {check_id!r} requires skip_reason"
+                )
+            if enforce_gate and required:
+                errors.append(
+                    f"{prefix}: required quality check {check_id!r} cannot be skipped"
+                )
+        elif enforce_gate and result_status in {"failed", "blocked"}:
+            errors.append(
+                f"{prefix}: quality check {check_id!r} is {result_status} and blocks closure"
+            )
+        elif enforce_gate and required and result_status == "pending":
+            errors.append(f"{prefix}: required quality check {check_id!r} is pending")
+
+    if enforce_gate and not required_ids:
+        errors.append(f"{prefix}: closure requires at least one required quality check")
+
+
 def any_passing_artifact(artifacts: dict[str, Any], groups: tuple[str, ...]) -> bool:
     return any(
         isinstance(artifact, dict) and artifact.get("result") == "pass"
@@ -818,6 +1269,7 @@ SUPPORTED_SCHEMA_KEYWORDS = {
     "maxItems",
     "uniqueItems",
     "minimum",
+    "maximum",
 }
 
 
@@ -861,38 +1313,82 @@ def load_adapters(
 
 def validate_adapter_integrity(adapter: dict[str, Any], prefix: str) -> list[str]:
     errors: list[str] = []
-    models = adapter.get("models") or []
-    model_ids = [str(model.get("id")) for model in models if model.get("id")]
-    duplicate_ids = sorted({model_id for model_id in model_ids if model_ids.count(model_id) > 1})
-    for model_id in duplicate_ids:
-        errors.append(f"{prefix}: duplicate model id {model_id!r}")
+    profiles = (
+        adapter.get("components", {})
+        .get("reasoning", {})
+        .get("profiles", {})
+    )
+    if not profiles:
+        errors.append(f"{prefix}: reasoning component requires at least one profile mapping")
 
-    model_component = adapter.get("components", {}).get("model", {})
-    default_model = model_component.get("default_model")
-    if default_model not in model_ids:
-        errors.append(f"{prefix}: default_model {default_model!r} is not declared in models")
-    for fallback_model in model_component.get("fallback_models", []):
-        if fallback_model not in model_ids:
-            errors.append(f"{prefix}: fallback model {fallback_model!r} is not declared in models")
-
-    for model in models:
-        if not model.get("reasoning_profiles"):
-            errors.append(f"{prefix}: model {model.get('id')!r} requires at least one reasoning profile")
+    model_component = adapter.get("components", {}).get("model")
+    if model_component:
+        model_profiles = model_component.get("profiles") or {}
+        if set(model_profiles) != {"fast", "standard", "deep", "critical"}:
+            errors.append(
+                f"{prefix}: model component must map every core reasoning profile"
+            )
+        for profile, route in model_profiles.items():
+            if not isinstance(route, dict) or not route.get("model_id"):
+                errors.append(f"{prefix}: model route {profile!r} requires model_id")
+            if not isinstance(route, dict) or route.get("complexity") not in {"simple", "complex"}:
+                errors.append(f"{prefix}: model route {profile!r} requires simple/complex complexity")
+            if not isinstance(route, dict) or not route.get("reasoning_effort"):
+                errors.append(f"{prefix}: model route {profile!r} requires reasoning_effort")
 
     worker = adapter.get("components", {}).get("worker", {})
+    operations = ("create", "send", "inspect", "wait", "rebind", "collect", "cancel")
     create = worker.get("create") or {}
-    if isinstance(create, dict) and not create.get("worker_id_path"):
-        errors.append(f"{prefix}: worker create operation requires worker_id_path")
-    for operation_name in ("create", "inspect", "cancel"):
+    create_paths = create.get("result_paths") if isinstance(create, dict) else {}
+    if isinstance(create_paths, dict) and not create_paths.get("worker_id"):
+        errors.append(f"{prefix}: worker create operation requires result_paths.worker_id")
+    for operation_name in operations:
         operation = worker.get(operation_name) or {}
         if not isinstance(operation, dict):
             continue
-        for path_field in ("worker_id_path", "status_path"):
-            value = operation.get(path_field)
-            if value is not None and not str(value).startswith("$."):
+        required_inputs = set(operation.get("input_fields") or [])
+        optional_inputs = set(operation.get("optional_input_fields") or [])
+        overlap = required_inputs & optional_inputs
+        if overlap:
+            errors.append(
+                f"{prefix}: worker {operation_name} inputs cannot be both required and optional: "
+                f"{', '.join(sorted(overlap))}"
+            )
+        for path_field, value in (operation.get("result_paths") or {}).items():
+            if value is not None and value != "$" and not str(value).startswith("$."):
                 errors.append(
-                    f"{prefix}: worker {operation_name}.{path_field} must use a $. path"
+                    f"{prefix}: worker {operation_name}.result_paths.{path_field} "
+                    "must use $ or a $. path"
                 )
+    status_map = adapter.get("status_map") or []
+    provider_statuses = [item.get("provider_status") for item in status_map]
+    if len(provider_statuses) != len(set(provider_statuses)):
+        errors.append(f"{prefix}: status_map provider_status values must be unique")
+    mapped_core_statuses = {item.get("core_status") for item in status_map}
+    required_statuses = {"queued", "running", "succeeded", "failed", "blocked", "cancelled"}
+    missing_statuses = required_statuses - mapped_core_statuses
+    if missing_statuses:
+        errors.append(
+            f"{prefix}: status_map does not cover core statuses: "
+            f"{', '.join(sorted(missing_statuses))}"
+        )
+    monitor = adapter.get("components", {}).get("monitor", {})
+    if "heartbeat" in set(monitor.get("modes") or []):
+        if monitor.get("heartbeat_target") != "coordinator-thread":
+            errors.append(
+                f"{prefix}: heartbeat monitor requires heartbeat_target=coordinator-thread"
+            )
+    if "event-lease" in set(monitor.get("modes") or []):
+        if not monitor.get("supports_lease_renewal"):
+            errors.append(f"{prefix}: event-lease monitor requires supports_lease_renewal=true")
+        if not monitor.get("event_wait_target"):
+            errors.append(f"{prefix}: event-lease monitor requires event_wait_target")
+        required = {"lease-watchdog", "terminal-event-wait"}
+        missing = required - set(adapter.get("capabilities") or [])
+        if missing:
+            errors.append(
+                f"{prefix}: event-lease monitor lacks capabilities: {', '.join(sorted(missing))}"
+            )
     return errors
 
 
@@ -905,8 +1401,105 @@ def latest_lease(run: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def validate_codex_heartbeat_automation(
+    heartbeat: dict[str, Any],
+    automation_dir: Path,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    automation_id = str(heartbeat.get("automation_id") or "")
+    automation_path = (automation_dir / automation_id / "automation.toml").resolve()
+    try:
+        automation_path.relative_to(automation_dir)
+    except ValueError:
+        errors.append(f"{prefix}: heartbeat automation_id escapes automation directory")
+        return
+
+    task_status = str(heartbeat.get("status") or "").lower()
+    if not automation_path.exists():
+        if task_status == "active":
+            errors.append(
+                f"{prefix}: active heartbeat automation is missing: {automation_path}"
+            )
+        return
+
+    try:
+        with automation_path.open("rb") as handle:
+            automation = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        errors.append(f"{prefix}: cannot load heartbeat automation {automation_path}: {exc}")
+        return
+
+    actual_status = str(automation.get("status") or "").lower()
+    if task_status == "active" and actual_status != "active":
+        errors.append(
+            f"{prefix}: Task heartbeat status active differs from Automation status "
+            f"{actual_status or 'missing'}"
+        )
+    elif task_status in {"paused", "stopped"} and actual_status == "active":
+        errors.append(
+            f"{prefix}: Task heartbeat status {task_status} differs from Automation status active"
+        )
+
+    if str(automation.get("kind") or "") != "heartbeat":
+        errors.append(f"{prefix}: heartbeat Automation kind must equal heartbeat")
+    expected_coordinator = str(heartbeat.get("coordinator_thread_id") or "")
+    actual_target = str(automation.get("target_thread_id") or "")
+    if actual_target != expected_coordinator:
+        errors.append(
+            f"{prefix}: heartbeat coordinator_thread_id {expected_coordinator!r} differs from "
+            f"Automation target_thread_id {actual_target!r}"
+        )
+    prompt = str(automation.get("prompt") or "").strip()
+    configured_budget = heartbeat.get("prompt_max_chars")
+    prompt_budget = (
+        min(configured_budget, HEARTBEAT_PROMPT_MAX_CHARS)
+        if isinstance(configured_budget, int) and not isinstance(configured_budget, bool)
+        else HEARTBEAT_PROMPT_MAX_CHARS
+    )
+    if not prompt:
+        errors.append(f"{prefix}: heartbeat Automation prompt must not be empty")
+    elif len(prompt) > prompt_budget:
+        errors.append(
+            f"{prefix}: heartbeat Automation prompt has {len(prompt)} chars; "
+            f"maximum is {prompt_budget}"
+        )
+
+    rrule = str(automation.get("rrule") or "")
+    if not re.search(r"(?:^|;)FREQ=MINUTELY(?:;|$)", rrule):
+        errors.append(f"{prefix}: heartbeat Automation RRULE must use FREQ=MINUTELY")
+        return
+    interval_match = re.search(r"(?:^|;)INTERVAL=([0-9]+)(?:;|$)", rrule)
+    if not interval_match:
+        errors.append(f"{prefix}: heartbeat Automation RRULE has no minute interval")
+        return
+    actual_interval = int(interval_match.group(1))
+    expected_interval = int(heartbeat["interval_minutes"])
+    if actual_interval != expected_interval:
+        errors.append(
+            f"{prefix}: Task heartbeat interval {expected_interval} differs from "
+            f"Automation interval {actual_interval}"
+        )
+
+
 def matches_any(value: str, needles: list[str]) -> bool:
     return any(needle in value for needle in needles)
+
+
+def design_freeze_fingerprint(freeze: dict[str, Any]) -> str:
+    payload = {
+        "scope": freeze.get("scope") or [],
+        "constraints": freeze.get("constraints") or [],
+        "acceptance": freeze.get("acceptance") or [],
+        "change_policy": freeze.get("change_policy"),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
 
 
 def worker_gate_slug(worker_name: str) -> str | None:
@@ -1060,6 +1653,8 @@ def validate_schema(value: Any, schema: dict[str, Any], path: str, root: dict[st
         errors.append(f"{path}: string is shorter than minLength={schema['minLength']}")
     if "minimum" in schema and isinstance(value, (int, float)) and value < schema["minimum"]:
         errors.append(f"{path}: value must be >= {schema['minimum']}")
+    if "maximum" in schema and isinstance(value, (int, float)) and value > schema["maximum"]:
+        errors.append(f"{path}: value must be <= {schema['maximum']}")
     if schema.get("format") == "date-time" and isinstance(value, str):
         try:
             parse_time(value)

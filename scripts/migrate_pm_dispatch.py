@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrate legacy PM dispatch Task/Evidence documents to schema version 2."""
+"""Migrate embedded Tasks to Task v4/Runtime v1 and Evidence to v2."""
 
 from __future__ import annotations
 
@@ -21,11 +21,15 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from validate_pm_dispatch import (  # noqa: E402
     assert_supported_schema,
+    compose_task_runtime,
+    design_freeze_fingerprint,
     load_adapters,
     load_structured_file,
     parse_time,
+    runtime_file_for,
     validate_adapter_resolution,
     validate_schema,
+    validate_task_runtime_layout,
 )
 
 
@@ -70,6 +74,27 @@ ARTIFACT_GROUPS = [
     "release_path",
 ]
 
+DEFAULT_AUTONOMY_POLICY = {
+    "default_action": "proceed",
+    "clarification_policy": "material-irreversible-only",
+    "blocker_policy": "hard-only",
+    "verification_policy": "risk-scaled",
+    "recovery": {
+        "same_method_retries": 1,
+        "alternate_method_attempts": 2,
+        "rediscovery_limit": 1,
+    },
+}
+
+BLOCKER_CAUSE_BY_TYPE = {
+    "environment": "external-unavailable",
+    "contract": "irreversible-contract",
+    "thread": "external-unavailable",
+    "pm": "human-authorization",
+    "dependency": "dependency",
+    "resource": "resource-conflict",
+}
+
 
 class MigrationError(ValueError):
     """Raised before source files are changed when migration cannot be proven safe."""
@@ -89,10 +114,11 @@ def migrate_task(
     source: dict[str, Any], adapters: dict[str, dict[str, Any]], now: str
 ) -> dict[str, Any]:
     task = copy.deepcopy(source)
-    if task.get("schema_version") == "2":
-        return task
+    if task.get("schema_version") == "3":
+        task = normalize_model_routes(task, adapters)
+        return normalize_dispatch_efficiency_contract(task, now)
 
-    task["schema_version"] = "2"
+    task["schema_version"] = "3"
     task["id"] = normalize_task_id(task.get("id"))
     area = "/".join(str(item) for item in task.get("area", []))
     if task.get("id") and task.get("priority") and area and task.get("title"):
@@ -102,34 +128,54 @@ def migrate_task(
     dispatch = task.setdefault("dispatch", {})
     strategy = dispatch.get("strategy", "direct")
     old_provider = dispatch.pop("provider", None)
-    old_policy = dispatch.pop("model_policy", None)
+    old_policy = dispatch.pop("model_policy", None) or {}
+    old_request = dispatch.pop("model_request", None) or {}
+    old_resolution = dispatch.get("resolution") or {}
+    old_fallback = dispatch.get("fallback_policy") or {}
     if strategy == "direct":
         dispatch.update(
             {
                 "provider_policy": {"mode": "local", "provider": "local"},
                 "required_capabilities": [],
                 "required_evidence_kinds": [],
-                "model_request": None,
+                "reasoning_profile": None,
                 "fallback_policy": None,
                 "resolution": None,
             }
         )
     else:
-        provider = str(old_provider or (dispatch.get("resolution") or {}).get("provider") or "codex")
+        provider = str(
+            old_provider
+            or old_resolution.get("provider")
+            or (dispatch.get("provider_policy") or {}).get("provider")
+            or "codex"
+        )
         adapter = adapters.get(provider)
         if not adapter:
             raise MigrationError(f"worker task uses unknown provider {provider!r}")
-        policy = old_policy or {}
-        profile = PROFILE_BY_DIFFICULTY.get(policy.get("difficulty"), "standard")
-        component_model = adapter.get("components", {}).get("model", {})
-        model_id = policy.get("selected_model") or component_model.get("default_model") or "unknown-model"
-        model = next(
-            (item for item in adapter.get("models", []) if item.get("id") == model_id), {}
+        profile = (
+            old_request.get("reasoning_profile")
+            or old_resolution.get("reasoning_profile")
+            or PROFILE_BY_DIFFICULTY.get(old_policy.get("difficulty"))
+            or "standard"
+        )
+        model_route = adapter.get("components", {}).get("model", {}).get("profiles", {}).get(profile)
+        model_id = model_route.get("model_id") if model_route else None
+        adapter_effort = (
+            adapter.get("components", {})
+            .get("reasoning", {})
+            .get("profiles", {})
+            .get(profile)
         )
         provider_effort = (
-            policy.get("reasoning_effort")
-            or model.get("reasoning_profiles", {}).get(profile)
-            or profile
+            model_route.get("reasoning_effort")
+            if model_route
+            else (
+                adapter_effort
+                or old_policy.get("reasoning_effort")
+                or old_resolution.get("provider_reasoning_effort")
+                or profile
+            )
         )
         heartbeat_required = bool(dispatch.get("heartbeat_required"))
         required_capabilities = list(dispatch.get("required_capabilities") or ["background-worker"])
@@ -142,9 +188,30 @@ def migrate_task(
         if not required_evidence:
             required_evidence = [kind for kind in ("command", "log") if kind in available_evidence]
         monitor_modes = adapter.get("components", {}).get("monitor", {}).get("modes", [])
-        monitor_mode = "heartbeat" if heartbeat_required and "heartbeat" in monitor_modes else None
+        has_heartbeat = isinstance(dispatch.get("heartbeat"), dict)
+        monitor_mode = (
+            "heartbeat"
+            if heartbeat_required and has_heartbeat and "heartbeat" in monitor_modes
+            else None
+        )
         if not monitor_mode:
-            monitor_mode = next((mode for mode in ("poll", "manual", "heartbeat") if mode in monitor_modes), "manual")
+            monitor_mode = "event-lease" if heartbeat_required and "event-lease" in monitor_modes else None
+        if not monitor_mode:
+            monitor_mode = "milestone" if heartbeat_required and "milestone" in monitor_modes else None
+        if not monitor_mode:
+            monitor_mode = "heartbeat" if heartbeat_required and "heartbeat" in monitor_modes else None
+        if not monitor_mode:
+            monitor_mode = next(
+                (mode for mode in ("event-lease", "milestone", "poll", "manual", "heartbeat") if mode in monitor_modes),
+                "manual",
+            )
+        resolved_capabilities = set(required_capabilities)
+        if monitor_mode in {"milestone", "event-lease"}:
+            resolved_capabilities.discard("heartbeat")
+            if "milestone-notify" in adapter.get("capabilities", []):
+                resolved_capabilities.add("milestone-notify")
+        if monitor_mode == "event-lease":
+            resolved_capabilities.update({"lease-watchdog", "terminal-event-wait"})
         resolution = {
             "provider": provider,
             "adapter_version": str(adapter.get("adapter_version", "0")),
@@ -153,28 +220,33 @@ def migrate_task(
             "provider_reasoning_effort": provider_effort,
             "worker_type": (adapter.get("worker_types") or ["agent-thread"])[0],
             "monitor_mode": monitor_mode,
-            "capabilities": sorted(set(required_capabilities)),
+            "capabilities": sorted(resolved_capabilities),
             "evidence_kinds": sorted(set(required_evidence)),
             "resolved_at": dispatch.get("selected_at") or now,
-            "reason": policy.get("reason") or "migrated from legacy model_policy",
+            "reason": (
+                old_policy.get("reason")
+                or old_resolution.get("reason")
+                or "migrated with provider reasoning and inherited/default model policy"
+            ),
+        }
+        provider_policy = dispatch.get("provider_policy") or {
+            "mode": "pinned",
+            "provider": provider,
+        }
+        fallback_policy = {
+            "mode": old_fallback.get("mode") or "strict",
+            "allowed_providers": old_fallback.get("allowed_providers") or [provider],
+            "allow_manual_monitoring": bool(
+                old_fallback.get("allow_manual_monitoring", False)
+            ),
         }
         dispatch.update(
             {
-                "provider_policy": {"mode": "pinned", "provider": provider},
+                "provider_policy": provider_policy,
                 "required_capabilities": sorted(set(required_capabilities)),
                 "required_evidence_kinds": sorted(set(required_evidence)),
-                "model_request": {
-                    "quality": model.get("quality", "any"),
-                    "reasoning_profile": profile,
-                    "latency": "normal",
-                    "cost": "balanced",
-                },
-                "fallback_policy": {
-                    "mode": "strict",
-                    "allowed_providers": [provider],
-                    "allow_model_substitution": False,
-                    "allow_manual_monitoring": False,
-                },
+                "reasoning_profile": profile,
+                "fallback_policy": fallback_policy,
                 "resolution": resolution,
             }
         )
@@ -186,11 +258,11 @@ def migrate_task(
             run_id_map[old_run_id] = run["run_id"]
             run["provider"] = provider
             run["adapter_version"] = resolution["adapter_version"]
-            run["model_id"] = run.pop("selected_model", None) or resolution["model_id"]
+            run["model_id"] = resolution["model_id"]
+            run.pop("selected_model", None)
             run["reasoning_profile"] = resolution["reasoning_profile"]
-            run["provider_reasoning_effort"] = (
-                run.pop("reasoning_effort", None) or resolution["provider_reasoning_effort"]
-            )
+            run.pop("reasoning_effort", None)
+            run["provider_reasoning_effort"] = resolution["provider_reasoning_effort"]
             run["resolution_reason"] = (
                 run.pop("model_reason", None) or resolution["reason"]
             )
@@ -205,9 +277,199 @@ def migrate_task(
     dispatch.setdefault("heartbeat_required", False)
     dispatch.setdefault("selected_at", now)
     dispatch.setdefault("max_parallel_workers", None if strategy == "direct" else 1)
+    normalize_dispatch_efficiency_contract(task, now)
     dispatch.setdefault("batch", None)
     dispatch.setdefault("heartbeat", None)
     dispatch.setdefault("escalation_triggers", [])
+    return task
+
+
+def normalize_dispatch_efficiency_contract(
+    task: dict[str, Any], now: str
+) -> dict[str, Any]:
+    """Backfill autonomy, design, and monitor fields without inventing runtime state."""
+    dispatch = task.setdefault("dispatch", {})
+    task.setdefault("quality_checks", {"policy": "risk-scaled", "checks": []})
+    dispatch.setdefault("autonomy_policy", copy.deepcopy(DEFAULT_AUTONOMY_POLICY))
+    normalize_blockers(task)
+    if (dispatch.get("resolution") or {}).get("monitor_mode") in {"milestone", "event-lease"}:
+        dispatch["heartbeat"] = None
+    if dispatch.get("strategy") == "direct":
+        dispatch["design_freeze"] = None
+        dispatch["worker_reuse"] = None
+        return task
+
+    strategy = dispatch.get("strategy")
+    if strategy in {"single-worker", "batch-worker"}:
+        dispatch["worker_reuse"] = {
+            "mode": "sticky",
+            "reuse_across_gates": True,
+            "max_runs_per_worker": 6,
+            "replacement_triggers": [
+                "irrecoverable-worker",
+                "safety-boundary-change",
+                "design-freeze-change",
+                "provider-change",
+                "context-saturated",
+                "independent-review",
+            ],
+        }
+    else:
+        dispatch["worker_reuse"] = {
+            "mode": "isolated",
+            "reuse_across_gates": False,
+            "max_runs_per_worker": 1,
+            "replacement_triggers": [
+                "irrecoverable-worker",
+                "safety-boundary-change",
+                "design-freeze-change",
+                "provider-change",
+                "context-saturated",
+                "independent-review",
+            ],
+        }
+
+    freeze = dispatch.get("design_freeze")
+    if not isinstance(freeze, dict):
+        required_levels = task.get("verification", {}).get("required_levels") or []
+        freeze = {
+            "status": "frozen",
+            "frozen_at": dispatch.get("selected_at") or now,
+            "scope": list(task.get("area") or ["legacy-task-scope"]),
+            "constraints": [
+                "Preserve the accepted scope and existing behavior recorded by the task."
+            ],
+            "acceptance": (
+                [f"Satisfy {level} with structured evidence." for level in required_levels]
+                or ["Satisfy the task verification policy with structured evidence."]
+            ),
+            "fingerprint": None,
+            "change_policy": "material-only-new-attempt",
+        }
+        freeze["fingerprint"] = design_freeze_fingerprint(freeze)
+        dispatch["design_freeze"] = freeze
+    elif freeze.get("change_policy") != "material-only-new-attempt":
+        freeze["change_policy"] = "material-only-new-attempt"
+        freeze["fingerprint"] = design_freeze_fingerprint(freeze)
+
+    fingerprint = freeze.get("fingerprint")
+    previous_worker_id: str | None = None
+    for run in task.get("runs", []):
+        worker_id = run.get("worker_id")
+        if "worker_replacement_reason" not in run:
+            run["worker_replacement_reason"] = (
+                "legacy-history"
+                if previous_worker_id and worker_id and worker_id != previous_worker_id
+                else None
+            )
+        if worker_id:
+            previous_worker_id = str(worker_id)
+        if run.get("status") in {"queued", "running"}:
+            run["design_fingerprint"] = fingerprint
+        else:
+            run.setdefault("design_fingerprint", fingerprint)
+        for attempt in run.get("attempts", []):
+            lease = attempt.get("lease")
+            if not isinstance(lease, dict):
+                continue
+            checkpoint_at = lease.get("heartbeat_at") or lease.get("acquired_at") or now
+            lease.setdefault("heartbeat_at", checkpoint_at)
+            lease.setdefault("progress_seq", 0)
+            lease.setdefault("last_progress_at", checkpoint_at)
+            lease.setdefault("last_progress_summary", "migrated lease; progress unknown")
+            lease.setdefault("event_cursor", None)
+            lease.setdefault("liveness_state", "live")
+            lease.setdefault("monitor_gap_started_at", None)
+            lease.setdefault("disconnect_probe_count", 0)
+            lease.setdefault("disconnect_first_seen_at", None)
+
+    heartbeat = dispatch.get("heartbeat")
+    if isinstance(heartbeat, dict):
+        active_runs = [
+            run for run in task.get("runs", []) if run.get("status") in {"queued", "running"}
+        ]
+        coordinator_thread_id = heartbeat.get("coordinator_thread_id")
+        if (
+            not isinstance(coordinator_thread_id, str)
+            or not coordinator_thread_id.strip()
+        ) and heartbeat.get("status") in {"paused", "stopped"}:
+            heartbeat["coordinator_thread_id"] = (
+                f"legacy-coordinator:{task.get('id', 'unknown')}"
+            )
+        heartbeat.pop("monitor_thread_id", None)
+        heartbeat.setdefault(
+            "target_run_id",
+            active_runs[0].get("run_id") if active_runs else (task.get("runs") or [{}])[-1].get("run_id"),
+        )
+        heartbeat["context_policy"] = "coordinator"
+        heartbeat["scan_scope"] = "incremental"
+        heartbeat["read_set"] = ["worker-status", "lease", "latest-milestone"]
+        heartbeat["full_scan_triggers"] = [
+            "milestone",
+            "terminal",
+            "safety-boundary-change",
+            "design-freeze-change",
+        ]
+        heartbeat.setdefault("prompt_max_chars", 220)
+        heartbeat["interval_minutes"] = 10
+        heartbeat["lightweight"] = True
+    return task
+
+
+def normalize_blockers(task: dict[str, Any]) -> None:
+    """Backfill legacy blocker classification without fabricating recovery attempts."""
+    for blocker in task.get("blockers", []):
+        blocker.setdefault("hard", blocker.get("status") == "open")
+        blocker.setdefault(
+            "cause",
+            BLOCKER_CAUSE_BY_TYPE.get(str(blocker.get("type")), "external-unavailable"),
+        )
+        blocker.setdefault("recovery_attempts", 0)
+        blocker.setdefault(
+            "next_unblock_action",
+            blocker.get("resolution") or blocker.get("description") or "Review blocker",
+        )
+
+
+def normalize_model_routes(
+    task: dict[str, Any], adapters: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Normalize current Provider reasoning/model policy in an already-v3 Task."""
+    dispatch = task.get("dispatch") or {}
+    resolution = dispatch.get("resolution")
+    if dispatch.get("strategy") == "direct" or not isinstance(resolution, dict):
+        return task
+    provider = resolution.get("provider")
+    adapter = adapters.get(str(provider))
+    if not adapter:
+        raise MigrationError(f"worker task uses unknown provider {provider!r}")
+    profile = resolution.get("reasoning_profile") or dispatch.get("reasoning_profile")
+    model_route = adapter.get("components", {}).get("model", {}).get("profiles", {}).get(profile)
+    if model_route:
+        resolution["model_id"] = model_route["model_id"]
+        resolution["provider_reasoning_effort"] = model_route["reasoning_effort"]
+    else:
+        resolution["model_id"] = None
+        resolution["provider_reasoning_effort"] = (
+            adapter.get("components", {})
+            .get("reasoning", {})
+            .get("profiles", {})
+            .get(profile)
+        )
+    resolution["adapter_version"] = str(adapter.get("adapter_version", "0"))
+    monitor_modes = adapter.get("components", {}).get("monitor", {}).get("modes", [])
+    if dispatch.get("heartbeat_required") and isinstance(dispatch.get("heartbeat"), dict) and "heartbeat" in monitor_modes:
+        resolution["monitor_mode"] = "heartbeat"
+        capabilities = set(resolution.get("capabilities") or [])
+        capabilities.add("heartbeat")
+        resolution["capabilities"] = sorted(capabilities)
+    for run in task.get("runs", []):
+        if run.get("status") in {"queued", "running"}:
+            run["adapter_version"] = resolution["adapter_version"]
+            run["model_id"] = resolution.get("model_id")
+            run["provider_reasoning_effort"] = resolution["provider_reasoning_effort"]
+        else:
+            run.setdefault("model_id", resolution.get("model_id"))
     return task
 
 
@@ -246,6 +508,7 @@ def migrate_run_identity(run: dict[str, Any], task: dict[str, Any], index: int) 
 def migrate_evidence(source: dict[str, Any], now: str) -> dict[str, Any]:
     evidence = copy.deepcopy(source)
     if evidence.get("schema_version") == "2":
+        evidence.setdefault("quality_checks", [])
         return evidence
 
     evidence["schema_version"] = "2"
@@ -259,6 +522,7 @@ def migrate_evidence(source: dict[str, Any], now: str) -> dict[str, Any]:
     verification.setdefault("levels", {})
     verification.setdefault("existing_data_regression", "not verified")
     verification.setdefault("uncovered_items", ["legacy evidence requires structured recapture"])
+    evidence.setdefault("quality_checks", [])
 
     artifacts = evidence.setdefault("artifacts", {})
     for group in ARTIFACT_GROUPS:
@@ -283,6 +547,41 @@ def migrate_evidence(source: dict[str, Any], now: str) -> dict[str, Any]:
         },
     )
     return evidence
+
+
+def split_task_runtime(
+    source: dict[str, Any], now: str, runtime_file: str = "runtime.yaml"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a normalized embedded Task v3 into Task v4 and Runtime v1."""
+    if source.get("schema_version") != "3":
+        raise MigrationError("runtime split requires a normalized Task v3")
+    task = copy.deepcopy(source)
+    dispatch = task.setdefault("dispatch", {})
+    resolution = dispatch.pop("resolution", None)
+    selected_at = dispatch.pop("selected_at", None)
+    heartbeat = dispatch.pop("heartbeat", None)
+    resources = task.pop("resources", {"locks": []})
+    runs = task.pop("runs", [])
+    for run in runs:
+        run.setdefault("continuation_token", None)
+        run.setdefault("event_cursor", None)
+        run.setdefault("last_operation", None)
+        run.setdefault("last_idempotency_key", None)
+    task["schema_version"] = "4"
+    task["runtime_file"] = runtime_file
+    runtime = {
+        "schema_version": "1",
+        "task_id": task.get("id"),
+        "task_schema_version": "4",
+        "resolution": resolution,
+        "selected_at": selected_at,
+        "heartbeat": heartbeat,
+        "resources": resources,
+        "runs": runs,
+        "event_log_file": "events.jsonl",
+        "last_updated": source.get("last_updated") or now,
+    }
+    return task, runtime
 
 
 def migrate_artifact(group: str, item: Any, index: int, captured_at: str) -> dict[str, Any]:
@@ -378,8 +677,29 @@ def validate_migrated_document(
     return errors
 
 
-def atomic_write_with_backup(path: Path, rendered: str) -> Path:
-    backup = path.with_suffix(path.suffix + ".v1.bak")
+def validate_migrated_task_bundle(
+    task: dict[str, Any],
+    runtime: dict[str, Any],
+    task_schema: dict[str, Any],
+    runtime_schema: dict[str, Any],
+    adapters: dict[str, dict[str, Any]],
+    prefix: str,
+) -> list[str]:
+    errors = validate_schema(task, task_schema, prefix, task_schema)
+    errors.extend(
+        validate_schema(runtime, runtime_schema, f"{prefix}:runtime", runtime_schema)
+    )
+    errors.extend(validate_task_runtime_layout(task, runtime, prefix))
+    if not errors and runtime.get("resolution"):
+        validate_adapter_resolution(
+            compose_task_runtime(task, runtime), adapters, errors, prefix
+        )
+    return errors
+
+
+def atomic_write_with_backup(path: Path, rendered: str, source_version: str = "1") -> Path:
+    version = source_version if re.fullmatch(r"[0-9]+", source_version) else "legacy"
+    backup = path.with_suffix(path.suffix + f".v{version}.bak")
     if backup.exists():
         raise MigrationError(f"backup already exists: {backup}")
     temporary = path.with_name(f".{path.name}.migrating")
@@ -393,8 +713,22 @@ def atomic_write_with_backup(path: Path, rendered: str) -> Path:
     return backup
 
 
+def atomic_write_new(path: Path, rendered: str) -> None:
+    if path.exists():
+        raise MigrationError(f"refusing to overwrite existing sidecar: {path}")
+    temporary = path.with_name(f".{path.name}.migrating")
+    try:
+        temporary.write_text(rendered, encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Migrate PM dispatch documents to schema v2.")
+    parser = argparse.ArgumentParser(
+        description="Migrate Task to v4/Runtime v1 and Evidence to v2."
+    )
     parser.add_argument("paths", nargs="+", help="Task/Evidence files or a docs/tasks directory")
     parser.add_argument("--adapter-dir", help="Directory containing *.adapter.json")
     parser.add_argument("--now", help="Migration timestamp in ISO-8601")
@@ -406,10 +740,12 @@ def main() -> int:
     schema_dir = root / "references" / "schemas"
     task_schema = load_structured_file(schema_dir / "task.schema.json")
     evidence_schema = load_structured_file(schema_dir / "evidence.schema.json")
+    runtime_schema = load_structured_file(schema_dir / "runtime.schema.json")
     adapter_schema = load_structured_file(schema_dir / "adapter.schema.json")
     for name, schema in (
         ("task.schema.json", task_schema),
         ("evidence.schema.json", evidence_schema),
+        ("runtime.schema.json", runtime_schema),
         ("adapter.schema.json", adapter_schema),
     ):
         assert_supported_schema(schema, name)
@@ -417,13 +753,73 @@ def main() -> int:
     if adapter_errors:
         raise MigrationError("invalid adapter catalog: " + "; ".join(adapter_errors))
     now = args.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    pending: list[tuple[Path, dict[str, Any], str, str, bool]] = []
+    pending: list[dict[str, Any]] = []
     for path in collect_paths(args.paths):
         document = load_structured_file(path)
+        source_version = str(document.get("schema_version") or "1")
         if "dispatch" in document or "id" in document:
-            migrated = migrate_task(document, adapter_catalog, now)
-            document_type = "task"
-        elif "task_id" in document:
+            creating_runtime = document.get("schema_version") != "4"
+            if document.get("schema_version") == "4":
+                migrated_task = copy.deepcopy(document)
+                runtime_path = runtime_file_for(path, migrated_task, None)
+                if runtime_path is None or not runtime_path.exists():
+                    raise MigrationError(f"{path}: Task v4 Runtime sidecar is missing")
+                runtime = load_structured_file(runtime_path)
+            else:
+                embedded = migrate_task(document, adapter_catalog, now)
+                migrated_task, runtime = split_task_runtime(embedded, now)
+                runtime_path = path.parent / migrated_task["runtime_file"]
+                if args.write and runtime_path.exists():
+                    raise MigrationError(
+                        f"{path}: refusing to replace existing Runtime sidecar {runtime_path}"
+                    )
+            migration_errors = validate_migrated_task_bundle(
+                migrated_task,
+                runtime,
+                task_schema,
+                runtime_schema,
+                adapter_catalog,
+                str(path),
+            )
+            if migration_errors:
+                raise MigrationError(
+                    "migrated output is invalid: " + "; ".join(migration_errors)
+                )
+            pending.append(
+                {
+                    "path": path,
+                    "rendered": json.dumps(migrated_task, ensure_ascii=False, indent=2) + "\n",
+                    "changed": migrated_task != document,
+                    "source_version": source_version,
+                    "new": False,
+                }
+            )
+            pending.append(
+                {
+                    "path": runtime_path,
+                    "rendered": json.dumps(runtime, ensure_ascii=False, indent=2) + "\n",
+                    "changed": not runtime_path.exists(),
+                    "source_version": "1",
+                    "new": not runtime_path.exists(),
+                }
+            )
+            event_path = runtime_path.parent / runtime["event_log_file"]
+            if creating_runtime and args.write and event_path.exists():
+                raise MigrationError(
+                    f"{path}: refusing to reuse existing Runtime event log {event_path}"
+                )
+            if not event_path.exists():
+                pending.append(
+                    {
+                        "path": event_path,
+                        "rendered": "",
+                        "changed": True,
+                        "source_version": "1",
+                        "new": True,
+                    }
+                )
+            continue
+        if "task_id" in document and "task_schema_version" not in document:
             migrated = migrate_evidence(document, now)
             document_type = "evidence"
         else:
@@ -439,19 +835,34 @@ def main() -> int:
         if migration_errors:
             raise MigrationError("migrated output is invalid: " + "; ".join(migration_errors))
         rendered = json.dumps(migrated, ensure_ascii=False, indent=2) + "\n"
-        pending.append((path, migrated, rendered, document_type, migrated != document))
+        pending.append(
+            {
+                "path": path,
+                "rendered": rendered,
+                "changed": migrated != document,
+                "source_version": source_version,
+                "new": False,
+            }
+        )
 
     if not args.write:
-        for path, _, rendered, _, _ in pending:
-            print(f"--- {path}")
-            print(rendered, end="")
+        for item in pending:
+            print(f"--- {item['path']}")
+            print(item["rendered"], end="")
         return 0
 
-    for path, _, rendered, _, changed in pending:
-        if not changed:
+    for item in pending:
+        path = item["path"]
+        if not item["changed"]:
             print(f"unchanged {path}")
             continue
-        backup = atomic_write_with_backup(path, rendered)
+        if item["new"]:
+            atomic_write_new(path, item["rendered"])
+            print(f"created {path}")
+            continue
+        backup = atomic_write_with_backup(
+            path, item["rendered"], item["source_version"]
+        )
         print(f"migrated {path} (backup: {backup})")
     return 0
 

@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_validate_pm_dispatch import base_task
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATOR_PATH = ROOT / "scripts" / "migrate_pm_dispatch.py"
@@ -52,7 +54,7 @@ def legacy_worker_task() -> dict:
             "model_policy": {
                 "difficulty": "hard",
                 "tier": "reasoning",
-                "selected_model": "gpt-5.6-sol",
+                "selected_model": "legacy-explicit-model",
                 "reasoning_effort": "high",
                 "reason": "legacy hard task",
                 "override_allowed": False,
@@ -70,7 +72,7 @@ def legacy_worker_task() -> dict:
                 "worker_label": "bug001-env-block [impl w01]",
                 "worker_id": "codex-thread:legacy",
                 "model_tier": "reasoning",
-                "selected_model": "gpt-5.6-sol",
+                "selected_model": "legacy-explicit-model",
                 "reasoning_effort": "high",
                 "model_reason": "legacy hard task",
                 "status": "running",
@@ -97,19 +99,24 @@ class MigratorCase(unittest.TestCase):
 
     def test_migrates_legacy_id_and_display_name(self) -> None:
         migrated = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
-        self.assertEqual(migrated["schema_version"], "2")
+        self.assertEqual(migrated["schema_version"], "3")
         self.assertEqual(migrated["id"], "BUG-001")
         self.assertEqual(migrated["display_name"], "BUG-001 P1 AA 环境阻塞")
+        self.assertEqual(
+            migrated["quality_checks"], {"policy": "risk-scaled", "checks": []}
+        )
 
-    def test_splits_legacy_model_policy_into_request_resolution_and_run_actuals(self) -> None:
+    def test_converts_legacy_model_selection_to_inherited_codex_model(self) -> None:
         migrated = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
         dispatch = migrated["dispatch"]
         self.assertNotIn("model_policy", dispatch)
-        self.assertEqual(dispatch["model_request"]["reasoning_profile"], "deep")
+        self.assertNotIn("model_request", dispatch)
+        self.assertEqual(dispatch["reasoning_profile"], "deep")
+        self.assertIsNone(dispatch["resolution"]["model_id"])
         self.assertEqual(dispatch["resolution"]["provider_reasoning_effort"], "high")
         run = migrated["runs"][0]
         self.assertNotIn("selected_model", run)
-        self.assertEqual(run["model_id"], "gpt-5.6-sol")
+        self.assertIsNone(run["model_id"])
         self.assertEqual(run["reasoning_profile"], "deep")
         self.assertEqual(run["worker_name"], "BUG-001-impl-w01")
         self.assertEqual(run["run_id"], "run-BUG-001-impl-w01")
@@ -130,11 +137,185 @@ class MigratorCase(unittest.TestCase):
         self.assertEqual(migrated["artifacts"]["browser"][0]["result"], "info")
         self.assertEqual(migrated["artifacts"]["commands"][0]["result"], "info")
         self.assertEqual(migrated["artifacts"]["commands"][0]["exit_code"], -1)
+        self.assertEqual(migrated["quality_checks"], [])
 
-    def test_v2_migration_is_idempotent(self) -> None:
+    def test_current_evidence_backfills_empty_quality_contract(self) -> None:
+        migrated = self.migrator.migrate_evidence({"schema_version": "2"}, NOW)
+        self.assertEqual(migrated["quality_checks"], [])
+
+    def test_v3_migration_is_idempotent(self) -> None:
         once = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
         twice = self.migrator.migrate_task(copy.deepcopy(once), self.adapters, NOW)
         self.assertEqual(twice, once)
+
+    def test_splits_embedded_runtime_from_task_contract(self) -> None:
+        embedded = self.migrator.migrate_task(
+            legacy_worker_task(), self.adapters, NOW
+        )
+        task, runtime = self.migrator.split_task_runtime(embedded, NOW)
+        self.assertEqual(task["schema_version"], "4")
+        self.assertEqual(task["runtime_file"], "runtime.yaml")
+        self.assertNotIn("runs", task)
+        self.assertNotIn("resources", task)
+        self.assertNotIn("resolution", task["dispatch"])
+        self.assertNotIn("heartbeat", task["dispatch"])
+        self.assertEqual(runtime["schema_version"], "1")
+        self.assertEqual(runtime["task_id"], "BUG-001")
+        self.assertEqual(runtime["runs"][0]["continuation_token"], None)
+        self.assertEqual(runtime["event_log_file"], "events.jsonl")
+
+    def test_cli_writes_task_v4_runtime_and_event_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "BUG-041"
+            task_dir.mkdir()
+            path = task_dir / "task.yaml"
+            path.write_text(json.dumps(base_task(), ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(MIGRATOR_PATH),
+                    str(path),
+                    "--now",
+                    NOW,
+                    "--write",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            task = json.loads(path.read_text(encoding="utf-8"))
+            runtime = json.loads((task_dir / "runtime.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(task["schema_version"], "4")
+            self.assertNotIn("runs", task)
+            self.assertEqual(runtime["task_id"], "BUG-041")
+            self.assertTrue((task_dir / "events.jsonl").exists())
+            self.assertTrue(path.with_suffix(".yaml.v3.bak").exists())
+
+    def test_existing_v3_task_backfills_inherited_model(self) -> None:
+        task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        task["dispatch"]["resolution"].pop("model_id")
+        task["runs"][0].pop("model_id")
+        normalized = self.migrator.migrate_task(task, self.adapters, NOW)
+        self.assertIsNone(normalized["dispatch"]["resolution"]["model_id"])
+        self.assertIsNone(normalized["runs"][0]["model_id"])
+        self.assertEqual(normalized["dispatch"]["resolution"]["adapter_version"], "9")
+        self.assertEqual(normalized["runs"][0]["adapter_version"], "9")
+
+    def test_worker_migration_prefers_milestones_and_backfills_autonomy(self) -> None:
+        migrated = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        dispatch = migrated["dispatch"]
+        self.assertEqual(dispatch["resolution"]["monitor_mode"], "event-lease")
+        self.assertIn("lease-watchdog", dispatch["resolution"]["capabilities"])
+        self.assertIn("terminal-event-wait", dispatch["resolution"]["capabilities"])
+        self.assertIsNone(dispatch["heartbeat"])
+        self.assertEqual(dispatch["autonomy_policy"]["default_action"], "proceed")
+        self.assertEqual(
+            dispatch["design_freeze"]["change_policy"],
+            "material-only-new-attempt",
+        )
+        lease = migrated["runs"][0]["attempts"][0]["lease"]
+        self.assertEqual(lease["progress_seq"], 0)
+        self.assertEqual(lease["last_progress_at"], NOW)
+        self.assertEqual(lease["last_progress_summary"], "migrated lease; progress unknown")
+        self.assertIsNone(lease["event_cursor"])
+        self.assertEqual(lease["liveness_state"], "live")
+        self.assertIsNone(lease["monitor_gap_started_at"])
+        self.assertEqual(lease["disconnect_probe_count"], 0)
+        self.assertIsNone(lease["disconnect_first_seen_at"])
+        self.assertEqual(dispatch["worker_reuse"]["mode"], "sticky")
+        self.assertTrue(dispatch["worker_reuse"]["reuse_across_gates"])
+
+    def test_existing_heartbeat_is_moved_to_ten_minute_incremental_scan(self) -> None:
+        task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        task["dispatch"]["heartbeat"] = {
+            "automation_id": "automation-001",
+            "coordinator_thread_id": "codex-thread:pm-1",
+            "monitor_thread_id": "codex-thread:legacy-monitor",
+            "interval_minutes": 15,
+            "max_checks": 4,
+            "stop_condition": "run terminal",
+            "lightweight": True,
+            "status": "active",
+        }
+        normalized = self.migrator.migrate_task(task, self.adapters, NOW)
+        heartbeat = normalized["dispatch"]["heartbeat"]
+        self.assertEqual(normalized["dispatch"]["resolution"]["monitor_mode"], "heartbeat")
+        self.assertEqual(heartbeat["scan_scope"], "incremental")
+        self.assertEqual(
+            heartbeat["read_set"],
+            ["worker-status", "lease", "latest-milestone"],
+        )
+        self.assertEqual(heartbeat["context_policy"], "coordinator")
+        self.assertEqual(heartbeat["interval_minutes"], 10)
+        self.assertNotIn("monitor_thread_id", heartbeat)
+        self.assertTrue(heartbeat["lightweight"])
+
+    def test_stopped_legacy_heartbeat_backfills_historical_coordinator(self) -> None:
+        task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        task["dispatch"]["heartbeat"] = {
+            "automation_id": "legacy-heartbeat",
+            "interval_minutes": 15,
+            "max_checks": 4,
+            "stop_condition": "legacy run reached terminal state",
+            "lightweight": True,
+            "status": "stopped",
+        }
+
+        normalized = self.migrator.migrate_task(task, self.adapters, NOW)
+
+        self.assertEqual(
+            normalized["dispatch"]["heartbeat"]["coordinator_thread_id"],
+            "legacy-coordinator:BUG-001",
+        )
+
+    def test_paused_legacy_heartbeat_backfills_historical_coordinator(self) -> None:
+        task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        task["dispatch"]["heartbeat"] = {
+            "automation_id": "legacy-heartbeat",
+            "interval_minutes": 15,
+            "max_checks": 4,
+            "stop_condition": "legacy run reached terminal state",
+            "lightweight": True,
+            "status": "paused",
+        }
+
+        normalized = self.migrator.migrate_task(task, self.adapters, NOW)
+
+        self.assertEqual(
+            normalized["dispatch"]["heartbeat"]["coordinator_thread_id"],
+            "legacy-coordinator:BUG-001",
+        )
+
+    def test_existing_v3_external_task_drops_undeclared_model(self) -> None:
+        task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        task["dispatch"]["resolution"]["provider"] = "external-cli"
+        task["dispatch"]["resolution"]["model_id"] = "stale-model"
+        task["runs"][0]["provider"] = "external-cli"
+        task["runs"][0]["model_id"] = "stale-model"
+        normalized = self.migrator.migrate_task(task, self.adapters, NOW)
+        self.assertIsNone(normalized["dispatch"]["resolution"]["model_id"])
+        self.assertIsNone(normalized["runs"][0]["model_id"])
+
+    def test_v2_task_drops_codex_model_override(self) -> None:
+        v2 = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        v2["schema_version"] = "2"
+        v2["dispatch"]["model_request"] = {
+            "quality": "frontier",
+            "reasoning_profile": v2["dispatch"].pop("reasoning_profile"),
+            "latency": "normal",
+            "cost": "balanced",
+        }
+        v2["dispatch"]["fallback_policy"]["allow_model_substitution"] = False
+        v2["dispatch"]["resolution"]["model_id"] = "legacy-explicit-model"
+        v2["runs"][0]["model_id"] = "legacy-explicit-model"
+
+        migrated = self.migrator.migrate_task(v2, self.adapters, NOW)
+        self.assertEqual(migrated["schema_version"], "3")
+        self.assertNotIn("model_request", migrated["dispatch"])
+        self.assertNotIn("allow_model_substitution", migrated["dispatch"]["fallback_policy"])
+        self.assertIsNone(migrated["dispatch"]["resolution"]["model_id"])
+        self.assertIsNone(migrated["runs"][0]["model_id"])
 
     def test_partial_dict_artifact_is_normalized_to_v2_schema(self) -> None:
         evidence = {

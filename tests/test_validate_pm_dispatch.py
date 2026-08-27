@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -13,9 +14,23 @@ VALIDATOR = ROOT / "scripts" / "validate_pm_dispatch.py"
 NOW = "2026-07-13T12:00:00Z"
 
 
+def autonomy_policy() -> dict:
+    return {
+        "default_action": "proceed",
+        "clarification_policy": "material-irreversible-only",
+        "blocker_policy": "hard-only",
+        "verification_policy": "risk-scaled",
+        "recovery": {
+            "same_method_retries": 1,
+            "alternate_method_attempts": 2,
+            "rediscovery_limit": 1,
+        },
+    }
+
+
 def base_task(task_id: str = "BUG-041") -> dict:
     return {
-        "schema_version": "2",
+        "schema_version": "3",
         "id": task_id,
         "display_name": f"{task_id} P1 AA 最近诊断记录",
         "title": "最近诊断记录",
@@ -33,6 +48,17 @@ def base_task(task_id: str = "BUG-041") -> dict:
             "mock_allowed": False,
             "missing": [],
         },
+        "quality_checks": {
+            "policy": "risk-scaled",
+            "checks": [
+                {
+                    "id": "unit-test",
+                    "requirement": "required",
+                    "when_changed_surface": [],
+                    "evidence_kinds": ["command"],
+                }
+            ],
+        },
         "blockers": [],
         "closure": {"status": "open"},
         "dependencies": {"requires": [], "blocks": [], "graph_checked_at": NOW},
@@ -47,9 +73,12 @@ def base_task(task_id: str = "BUG-041") -> dict:
             "heartbeat_required": False,
             "selected_at": NOW,
             "max_parallel_workers": None,
-            "model_request": None,
+            "reasoning_profile": None,
             "fallback_policy": None,
             "resolution": None,
+            "autonomy_policy": autonomy_policy(),
+            "design_freeze": None,
+            "worker_reuse": None,
             "batch": None,
             "heartbeat": None,
             "escalation_triggers": [],
@@ -69,6 +98,27 @@ def artifact(kind: str, artifact_id: str | None = None) -> dict:
         "captured_at": NOW,
         "evidence_ref": f"evidence/{kind}-001.json",
     }
+
+
+def frozen_design() -> dict:
+    freeze = {
+        "status": "frozen",
+        "frozen_at": NOW,
+        "scope": ["frontend/app"],
+        "constraints": ["Keep existing routes compatible."],
+        "acceptance": ["L1 command evidence passes."],
+        "fingerprint": None,
+        "change_policy": "material-only-new-attempt",
+    }
+    payload = {
+        key: freeze[key]
+        for key in ("scope", "constraints", "acceptance", "change_policy")
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    freeze["fingerprint"] = f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+    return freeze
 
 
 def base_evidence(task_id: str = "BUG-041") -> dict:
@@ -92,6 +142,17 @@ def base_evidence(task_id: str = "BUG-041") -> dict:
             "existing_data_regression": "passed",
             "uncovered_items": [],
         },
+        "quality_checks": [
+            {
+                "id": "unit-test",
+                "status": "passed",
+                "tool": "python-unittest",
+                "summary": "Unit tests passed.",
+                "evidence_refs": ["command-001"],
+                "skip_reason": None,
+                "checked_at": NOW,
+            }
+        ],
         "artifacts": {
             "commands": [
                 {
@@ -123,6 +184,15 @@ def base_evidence(task_id: str = "BUG-041") -> dict:
     }
 
 
+def verified_task(task_id: str = "BUG-041") -> dict:
+    task = base_task(task_id)
+    task["status"] = "VERIFIED"
+    task["lifecycle"]["phase"] = "closure"
+    task["closure"]["status"] = "ready"
+    task["verification"]["status"] = "L1_VERIFIED"
+    return task
+
+
 def codex_run(task_id: str = "SPEC-101", index: int = 1) -> dict:
     worker_name = f"{task_id}-impl-w{index:02d}"
     run_id = f"run-{worker_name}"
@@ -134,12 +204,14 @@ def codex_run(task_id: str = "SPEC-101", index: int = 1) -> dict:
         "worker_name": worker_name,
         "worker_label": f"{task_id} P1 AA 新增页面 [impl w{index:02d}]",
         "worker_id": f"codex-thread:thread-{index}",
+        "worker_replacement_reason": None,
         "provider": "codex",
-        "adapter_version": "1",
-        "model_id": "gpt-5.6-sol",
+        "adapter_version": "9",
+        "model_id": None,
         "reasoning_profile": "standard",
-        "provider_reasoning_effort": "medium",
+        "provider_reasoning_effort": "inherit",
         "resolution_reason": "normal task",
+        "design_fingerprint": frozen_design()["fingerprint"],
         "status": "running",
         "allow_parallel": index > 1,
         "started_at": NOW,
@@ -156,6 +228,14 @@ def codex_run(task_id: str = "SPEC-101", index: int = 1) -> dict:
                     "heartbeat_at": NOW,
                     "expires_at": "2026-07-13T13:00:00Z",
                     "renew_count": 0,
+                    "progress_seq": 0,
+                    "last_progress_at": NOW,
+                    "last_progress_summary": "worker dispatched",
+                    "event_cursor": None,
+                    "liveness_state": "live",
+                    "monitor_gap_started_at": None,
+                    "disconnect_probe_count": 0,
+                    "disconnect_first_seen_at": None,
                 },
             }
         ],
@@ -173,24 +253,18 @@ def codex_dispatch() -> dict:
         "heartbeat_required": True,
         "selected_at": NOW,
         "max_parallel_workers": 1,
-        "model_request": {
-            "quality": "frontier",
-            "reasoning_profile": "standard",
-            "latency": "normal",
-            "cost": "balanced",
-        },
+        "reasoning_profile": "standard",
         "fallback_policy": {
             "mode": "strict",
             "allowed_providers": ["codex"],
-            "allow_model_substitution": False,
             "allow_manual_monitoring": False,
         },
         "resolution": {
             "provider": "codex",
-            "adapter_version": "1",
-            "model_id": "gpt-5.6-sol",
+            "adapter_version": "9",
+            "model_id": None,
             "reasoning_profile": "standard",
-            "provider_reasoning_effort": "medium",
+            "provider_reasoning_effort": "inherit",
             "worker_type": "codex-thread",
             "monitor_mode": "heartbeat",
             "capabilities": ["background-worker", "code-edit", "git", "heartbeat", "shell"],
@@ -198,10 +272,37 @@ def codex_dispatch() -> dict:
             "resolved_at": NOW,
             "reason": "pinned provider satisfies the requested capabilities",
         },
+        "autonomy_policy": autonomy_policy(),
+        "design_freeze": frozen_design(),
+        "worker_reuse": {
+            "mode": "sticky",
+            "reuse_across_gates": True,
+            "max_runs_per_worker": 6,
+            "replacement_triggers": [
+                "irrecoverable-worker",
+                "safety-boundary-change",
+                "design-freeze-change",
+                "provider-change",
+                "context-saturated",
+                "independent-review",
+            ],
+        },
         "batch": None,
         "heartbeat": {
             "automation_id": "automation-001",
-            "interval_minutes": 15,
+            "coordinator_thread_id": "codex-thread:pm-1",
+            "target_run_id": "run-SPEC-101-impl-w01",
+            "context_policy": "coordinator",
+            "scan_scope": "incremental",
+            "read_set": ["worker-status", "lease", "latest-milestone"],
+            "full_scan_triggers": [
+                "milestone",
+                "terminal",
+                "safety-boundary-change",
+                "design-freeze-change",
+            ],
+            "prompt_max_chars": 220,
+            "interval_minutes": 10,
             "max_checks": 6,
             "stop_condition": "run terminal",
             "lightweight": True,
@@ -216,13 +317,30 @@ class ValidatorCase(unittest.TestCase):
         self,
         task: dict,
         evidence: dict | None = None,
+        runtime: dict | None = None,
+        runtime_events: list[dict] | None = None,
         adapters: list[dict] | None = None,
+        automation_status: str | None = None,
+        automation_interval: int | None = None,
+        automation_prompt: str = "增量检查目标 Run 的 Worker 状态、Lease 和最新里程碑；终态立即收口，监控不可用则保持所有权。",
+        automation_target_thread_id: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = Path(tmp) / task["id"]
             task_dir.mkdir()
             task_path = task_dir / "task.json"
             task_path.write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
+            if runtime is not None:
+                runtime_name = task.get("runtime_file") or "runtime.yaml"
+                (task_dir / runtime_name).write_text(
+                    json.dumps(runtime, ensure_ascii=False), encoding="utf-8"
+                )
+                event_name = runtime.get("event_log_file", "events.jsonl")
+                event_text = "".join(
+                    json.dumps(event, ensure_ascii=False) + "\n"
+                    for event in (runtime_events or [])
+                )
+                (task_dir / event_name).write_text(event_text, encoding="utf-8")
             if evidence is not None:
                 (task_dir / "evidence.json").write_text(
                     json.dumps(evidence, ensure_ascii=False), encoding="utf-8"
@@ -235,6 +353,32 @@ class ValidatorCase(unittest.TestCase):
                     path = adapter_dir / f"{adapter['provider']}.adapter.json"
                     path.write_text(json.dumps(adapter, ensure_ascii=False), encoding="utf-8")
                 command.extend(["--adapter-dir", str(adapter_dir)])
+            if automation_status is not None:
+                automation_id = task["dispatch"]["heartbeat"]["automation_id"]
+                automation_dir = Path(tmp) / "automations"
+                automation_path = automation_dir / automation_id / "automation.toml"
+                automation_path.parent.mkdir(parents=True)
+                interval = automation_interval or task["dispatch"]["heartbeat"][
+                    "interval_minutes"
+                ]
+                target_thread_id = (
+                    automation_target_thread_id
+                    or task["dispatch"]["heartbeat"]["coordinator_thread_id"]
+                )
+                automation_path.write_text(
+                    "\n".join(
+                        [
+                            'kind = "heartbeat"',
+                            f'prompt = {json.dumps(automation_prompt, ensure_ascii=False)}',
+                            f'status = "{automation_status}"',
+                            f'rrule = "FREQ=MINUTELY;INTERVAL={interval}"',
+                            f'target_thread_id = "{target_thread_id}"',
+                            "",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                command.extend(["--automation-dir", str(automation_dir)])
             return subprocess.run(
                 command,
                 text=True,
@@ -250,6 +394,33 @@ class ValidatorCase(unittest.TestCase):
     def test_valid_display_name_and_direct_task_pass(self) -> None:
         result = self.run_task(base_task())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_task_v4_uses_runtime_sidecar(self) -> None:
+        task = base_task()
+        runtime = {
+            "schema_version": "1",
+            "task_id": task["id"],
+            "task_schema_version": "4",
+            "resolution": task["dispatch"].pop("resolution"),
+            "selected_at": task["dispatch"].pop("selected_at"),
+            "heartbeat": task["dispatch"].pop("heartbeat"),
+            "resources": task.pop("resources"),
+            "runs": task.pop("runs"),
+            "event_log_file": "events.jsonl",
+            "last_updated": NOW,
+        }
+        task["schema_version"] = "4"
+        task["runtime_file"] = "runtime.yaml"
+        result = self.run_task(task, runtime=runtime)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_task_v4_rejects_embedded_runtime_state(self) -> None:
+        task = base_task()
+        task["schema_version"] = "4"
+        task["runtime_file"] = "runtime.yaml"
+        result = self.run_task(task)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("keeps runs in Runtime", result.stderr)
 
     def test_display_name_must_match_id_priority_area_and_title(self) -> None:
         task = base_task()
@@ -290,6 +461,137 @@ class ValidatorCase(unittest.TestCase):
         }
         result = self.run_task(task, base_evidence())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_required_quality_check_must_exist_at_closure(self) -> None:
+        evidence = base_evidence()
+        evidence["quality_checks"] = []
+        self.assert_invalid(
+            verified_task(), "required quality check 'unit-test' is missing", evidence
+        )
+
+    def test_passed_quality_check_requires_passing_artifact(self) -> None:
+        evidence = base_evidence()
+        evidence["artifacts"]["commands"][0].update(
+            {"result": "fail", "exit_code": 1}
+        )
+        self.assert_invalid(
+            verified_task(), "references non-passing artifact 'command-001'", evidence
+        )
+
+    def test_passed_quality_check_requires_declared_artifact_kind(self) -> None:
+        task = verified_task()
+        task["quality_checks"]["checks"][0]["evidence_kinds"] = ["log"]
+        self.assert_invalid(
+            task, "uses kind='command', expected one of ['log']", base_evidence()
+        )
+
+    def test_nonterminal_failed_quality_check_remains_recoverable(self) -> None:
+        evidence = base_evidence()
+        evidence["quality_checks"][0].update(
+            {
+                "status": "failed",
+                "summary": "Focused test failed; repair remains in the same Attempt.",
+                "evidence_refs": ["command-001"],
+            }
+        )
+        evidence["artifacts"]["commands"][0].update(
+            {"result": "fail", "exit_code": 1}
+        )
+        result = self.run_task(base_task(), evidence)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_untriggered_conditional_quality_check_may_be_skipped(self) -> None:
+        task = verified_task()
+        task["quality_checks"]["checks"].append(
+            {
+                "id": "security",
+                "requirement": "conditional",
+                "when_changed_surface": ["auth", "dependency", "secret"],
+                "evidence_kinds": ["command", "log"],
+            }
+        )
+        evidence = base_evidence()
+        evidence["quality_checks"].append(
+            {
+                "id": "security",
+                "status": "skipped",
+                "tool": None,
+                "summary": "No security-sensitive surface changed.",
+                "evidence_refs": [],
+                "skip_reason": "No configured trigger matched.",
+                "checked_at": NOW,
+            }
+        )
+        result = self.run_task(task, evidence)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_triggered_conditional_quality_check_cannot_be_skipped(self) -> None:
+        task = verified_task()
+        task["quality_checks"]["checks"].append(
+            {
+                "id": "security",
+                "requirement": "conditional",
+                "when_changed_surface": ["auth", "dependency", "secret"],
+                "evidence_kinds": ["command", "log"],
+            }
+        )
+        evidence = base_evidence()
+        evidence["verification"]["changed_surface"] = ["auth service"]
+        evidence["quality_checks"].append(
+            {
+                "id": "security",
+                "status": "skipped",
+                "tool": None,
+                "summary": "Skipped security scan.",
+                "evidence_refs": [],
+                "skip_reason": "Not run.",
+                "checked_at": NOW,
+            }
+        )
+        self.assert_invalid(
+            task, "required quality check 'security' cannot be skipped", evidence
+        )
+
+    def test_failed_optional_quality_check_blocks_closure(self) -> None:
+        task = verified_task()
+        task["quality_checks"]["checks"].append(
+            {
+                "id": "review",
+                "requirement": "optional",
+                "when_changed_surface": [],
+                "evidence_kinds": ["log"],
+            }
+        )
+        evidence = base_evidence()
+        evidence["quality_checks"].append(
+            {
+                "id": "review",
+                "status": "failed",
+                "tool": "codex-review",
+                "summary": "Review found an unresolved issue.",
+                "evidence_refs": [],
+                "skip_reason": None,
+                "checked_at": NOW,
+            }
+        )
+        self.assert_invalid(task, "quality check 'review' is failed and blocks closure", evidence)
+
+    def test_evidence_quality_check_must_be_declared_by_task(self) -> None:
+        evidence = base_evidence()
+        evidence["quality_checks"].append(
+            {
+                "id": "undeclared-check",
+                "status": "pending",
+                "tool": None,
+                "summary": "Unexpected result.",
+                "evidence_refs": [],
+                "skip_reason": None,
+                "checked_at": None,
+            }
+        )
+        self.assert_invalid(
+            verified_task(), "is not declared by Task", evidence
+        )
 
     def test_verified_rejects_unstructured_browser_evidence(self) -> None:
         task = base_task("SPEC-042")
@@ -356,10 +658,332 @@ class ValidatorCase(unittest.TestCase):
         task["runs"].append(codex_run(index=2))
         self.assert_invalid(task, "max_parallel_workers=1")
 
+    def test_single_worker_requires_sticky_cross_gate_reuse(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["worker_reuse"]["reuse_across_gates"] = False
+        self.assert_invalid(task, "requires sticky reuse across gates")
+
+    def test_single_worker_reuses_same_worker_across_runs(self) -> None:
+        task = self.worker_task()
+        first = task["runs"][0]
+        first["status"] = "succeeded"
+        first["finished_at"] = NOW
+        first["attempts"][0]["status"] = "succeeded"
+        first["attempts"][0]["finished_at"] = NOW
+        second = codex_run(index=2)
+        second["worker_id"] = first["worker_id"]
+        second["allow_parallel"] = False
+        task["runs"].append(second)
+        task["dispatch"]["heartbeat"]["target_run_id"] = second["run_id"]
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_single_worker_change_requires_structured_reason(self) -> None:
+        task = self.worker_task()
+        first = task["runs"][0]
+        first["status"] = "succeeded"
+        first["finished_at"] = NOW
+        first["attempts"][0]["status"] = "succeeded"
+        first["attempts"][0]["finished_at"] = NOW
+        second = codex_run(index=2)
+        second["allow_parallel"] = False
+        task["runs"].append(second)
+        task["dispatch"]["heartbeat"]["target_run_id"] = second["run_id"]
+        self.assert_invalid(task, "without an allowed worker_replacement_reason")
+
+    def test_single_worker_allows_irrecoverable_worker_replacement(self) -> None:
+        task = self.worker_task()
+        first = task["runs"][0]
+        first["status"] = "expired"
+        first["finished_at"] = NOW
+        first["attempts"][0]["status"] = "expired"
+        first["attempts"][0]["finished_at"] = NOW
+        second = codex_run(index=2)
+        second["allow_parallel"] = False
+        second["worker_replacement_reason"] = "irrecoverable-worker"
+        task["runs"].append(second)
+        task["dispatch"]["heartbeat"]["target_run_id"] = second["run_id"]
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_heartbeat_required_needs_automation_metadata(self) -> None:
         task = self.worker_task()
         task["dispatch"]["heartbeat"] = None
         self.assert_invalid(task, "heartbeat metadata")
+
+    def test_incremental_heartbeat_rejects_full_scan(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["heartbeat"]["scan_scope"] = "full"
+        self.assert_invalid(task, "expected one of ['incremental'], got 'full'")
+
+    def test_incremental_heartbeat_has_fixed_read_set(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["heartbeat"]["read_set"].append("task")
+        self.assert_invalid(task, "expected at most 3 items")
+
+    def test_unknown_liveness_holds_ownership_after_lease_expiry(self) -> None:
+        task = self.worker_task()
+        lease = task["runs"][0]["attempts"][0]["lease"]
+        lease["acquired_at"] = "2026-07-13T11:00:00Z"
+        lease["heartbeat_at"] = "2026-07-13T11:30:00Z"
+        lease["last_progress_at"] = "2026-07-13T11:30:00Z"
+        lease["expires_at"] = "2026-07-13T11:59:00Z"
+        lease["liveness_state"] = "unknown"
+        lease["monitor_gap_started_at"] = "2026-07-13T11:55:00Z"
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_worker_dispatch_requires_frozen_design(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["design_freeze"]["status"] = "draft"
+        task["dispatch"]["design_freeze"]["frozen_at"] = None
+        task["dispatch"]["design_freeze"]["fingerprint"] = None
+        self.assert_invalid(task, "requires a frozen design before dispatch")
+
+    def test_changed_design_requires_new_attempt(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["design_freeze"]["constraints"] = ["Use a different design."]
+        task["dispatch"]["design_freeze"] = frozen_design() | {
+            "constraints": ["Use a different design."]
+        }
+        payload = {
+            key: task["dispatch"]["design_freeze"][key]
+            for key in ("scope", "constraints", "acceptance", "change_policy")
+        }
+        canonical = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        task["dispatch"]["design_freeze"]["fingerprint"] = (
+            f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+        )
+        self.assert_invalid(task, "a new Attempt is required")
+
+    def test_heartbeat_coordinator_must_be_independent_from_worker(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["heartbeat"]["coordinator_thread_id"] = task["runs"][0]["worker_id"]
+        self.assert_invalid(task, "must differ from every Worker thread")
+
+    def test_heartbeat_rejects_second_monitor_thread(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["heartbeat"]["monitor_thread_id"] = "codex-thread:monitor-1"
+        self.assert_invalid(task, "additional property is not allowed")
+
+    def test_heartbeat_automation_prompt_has_hard_budget(self) -> None:
+        task = self.worker_task()
+        result = self.run_task(
+            task,
+            automation_status="ACTIVE",
+            automation_prompt="x" * 221,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("maximum is 220", result.stderr)
+
+    def test_heartbeat_automation_targets_dispatch_coordinator_thread(self) -> None:
+        task = self.worker_task()
+        result = self.run_task(
+            task,
+            automation_status="ACTIVE",
+            automation_target_thread_id="codex-thread:wrong-monitor",
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("differs from Automation target_thread_id", result.stderr)
+
+    def test_incremental_heartbeat_rejects_non_ten_minute_interval(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["heartbeat"]["interval_minutes"] = 5
+        self.assert_invalid(task, "expected one of [10], got 5")
+
+    def test_p0_incremental_heartbeat_uses_fixed_ten_minute_interval(self) -> None:
+        task = self.worker_task()
+        task["priority"] = "P0"
+        task["display_name"] = "SPEC-101 P0 AA 新增页面"
+        task["runs"][0]["worker_label"] = "SPEC-101 P0 AA 新增页面 [impl w01]"
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_lease_risk_keeps_fixed_ten_minute_incremental_heartbeat(self) -> None:
+        task = self.worker_task()
+        task["runs"][0]["attempts"][0]["lease"]["expires_at"] = (
+            "2026-07-13T12:10:00Z"
+        )
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_blocked_recovery_keeps_fixed_ten_minute_incremental_heartbeat(self) -> None:
+        task = self.worker_task()
+        task["status"] = "ENV_BLOCKED"
+        task["verification"]["status"] = "BLOCKED"
+        task["blockers"] = [
+            {
+                "id": "env-001",
+                "type": "environment",
+                "status": "open",
+                "description": "runtime unavailable",
+                "owner": "pm",
+                "hard": True,
+                "cause": "external-unavailable",
+                "recovery_attempts": 2,
+                "next_unblock_action": "wait for runtime recovery",
+                "opened_at": NOW,
+                "resolved_at": None,
+                "resolution": None,
+            }
+        ]
+        evidence = base_evidence("SPEC-101")
+        evidence["blockers"] = [
+            {
+                "id": "env-001",
+                "type": "environment",
+                "status": "open",
+                "description": "runtime unavailable",
+                "resolution": None,
+            }
+        ]
+        evidence["conclusion"].update(
+            {
+                "status": "ENV_BLOCKED",
+                "evidence_level": "NONE",
+                "real_chain_verified": False,
+            }
+        )
+        result = self.run_task(task, evidence)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_soft_blocker_cannot_move_task_to_blocked(self) -> None:
+        task = self.worker_task()
+        task["status"] = "ENV_BLOCKED"
+        task["verification"]["status"] = "BLOCKED"
+        task["blockers"] = [
+            {
+                "id": "env-soft-001",
+                "type": "environment",
+                "status": "open",
+                "description": "first tool failure",
+                "owner": "worker",
+                "hard": False,
+                "cause": "external-unavailable",
+                "recovery_attempts": 0,
+                "next_unblock_action": "retry in the same Worker",
+                "opened_at": NOW,
+                "resolved_at": None,
+                "resolution": None,
+            }
+        ]
+        self.assert_invalid(task, "requires an open hard blocker")
+
+    def test_external_hard_blocker_requires_two_recovery_paths(self) -> None:
+        task = self.worker_task()
+        task["status"] = "ENV_BLOCKED"
+        task["verification"]["status"] = "BLOCKED"
+        task["blockers"] = [
+            {
+                "id": "env-hard-001",
+                "type": "environment",
+                "status": "open",
+                "description": "external runtime unavailable",
+                "owner": "worker",
+                "hard": True,
+                "cause": "external-unavailable",
+                "recovery_attempts": 1,
+                "next_unblock_action": "try the second recovery path",
+                "opened_at": NOW,
+                "resolved_at": None,
+                "resolution": None,
+            }
+        ]
+        self.assert_invalid(task, "at least two materially different recovery attempts")
+
+    def test_event_lease_monitor_does_not_require_heartbeat_metadata(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["resolution"].update(
+            {
+                "monitor_mode": "event-lease",
+                "capabilities": [
+                    "background-worker",
+                    "code-edit",
+                    "git",
+                    "lease-watchdog",
+                    "milestone-notify",
+                    "shell",
+                    "terminal-event-wait",
+                ],
+            }
+        )
+        task["dispatch"]["heartbeat"] = None
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_event_lease_requires_progress_timestamp(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["resolution"].update(
+            {
+                "monitor_mode": "event-lease",
+                "capabilities": [
+                    "background-worker",
+                    "code-edit",
+                    "git",
+                    "lease-watchdog",
+                    "milestone-notify",
+                    "shell",
+                    "terminal-event-wait",
+                ],
+            }
+        )
+        task["dispatch"]["heartbeat"] = None
+        task["runs"][0]["attempts"][0]["lease"]["heartbeat_at"] = None
+        self.assert_invalid(task, "requires lease.heartbeat_at")
+
+    def test_event_lease_requires_persisted_progress_checkpoint(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["resolution"].update(
+            {
+                "monitor_mode": "event-lease",
+                "capabilities": [
+                    "background-worker",
+                    "code-edit",
+                    "git",
+                    "lease-watchdog",
+                    "milestone-notify",
+                    "shell",
+                    "terminal-event-wait",
+                ],
+            }
+        )
+        task["dispatch"]["heartbeat"] = None
+        task["runs"][0]["attempts"][0]["lease"]["last_progress_summary"] = None
+        self.assert_invalid(task, "requires a persisted progress checkpoint")
+
+    def test_active_run_requires_active_heartbeat(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["heartbeat"]["status"] = "paused"
+        self.assert_invalid(task, "active runs require heartbeat.status=active")
+
+    def test_heartbeat_cannot_remain_active_without_active_run(self) -> None:
+        task = self.worker_task()
+        run = task["runs"][0]
+        run.update({"status": "succeeded", "finished_at": NOW})
+        run["attempts"][0].update({"status": "succeeded", "finished_at": NOW})
+        self.assert_invalid(task, "heartbeat must be stopped or paused")
+
+    def test_task_and_real_automation_status_must_match(self) -> None:
+        task = self.worker_task()
+        run = task["runs"][0]
+        run.update({"status": "succeeded", "finished_at": NOW})
+        run["attempts"][0].update({"status": "succeeded", "finished_at": NOW})
+        task["dispatch"]["heartbeat"]["status"] = "paused"
+        result = self.run_task(task, automation_status="ACTIVE")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("differs from Automation status active", result.stderr)
+
+    def test_task_and_real_automation_interval_must_match(self) -> None:
+        task = self.worker_task()
+        result = self.run_task(
+            task,
+            automation_status="ACTIVE",
+            automation_interval=5,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("differs from Automation interval 5", result.stderr)
 
     def test_dependency_cycle_is_rejected(self) -> None:
         first = base_task("SPEC-201")
@@ -425,13 +1049,12 @@ class ValidatorCase(unittest.TestCase):
                 "fallback_policy": {
                     "mode": "strict",
                     "allowed_providers": ["external-cli"],
-                    "allow_model_substitution": False,
                     "allow_manual_monitoring": True,
                 },
                 "resolution": {
                     "provider": "external-cli",
-                    "adapter_version": "1",
-                    "model_id": "external-frontier",
+                    "adapter_version": "5",
+                    "model_id": None,
                     "reasoning_profile": "standard",
                     "provider_reasoning_effort": "normal",
                     "worker_type": "agent-thread",
@@ -449,8 +1072,8 @@ class ValidatorCase(unittest.TestCase):
                 "worker_type": "agent-thread",
                 "worker_id": "agent-thread:external-1",
                 "provider": "external-cli",
-                "adapter_version": "1",
-                "model_id": "external-frontier",
+                "adapter_version": "5",
+                "model_id": None,
                 "provider_reasoning_effort": "normal",
                 "resolution_reason": "external adapter satisfies the generic request",
             }
@@ -468,13 +1091,12 @@ class ValidatorCase(unittest.TestCase):
                 "fallback_policy": {
                     "mode": "compatible",
                     "allowed_providers": ["external-cli"],
-                    "allow_model_substitution": False,
                     "allow_manual_monitoring": True,
                 },
                 "resolution": {
                     "provider": "external-cli",
-                    "adapter_version": "1",
-                    "model_id": "external-frontier",
+                    "adapter_version": "5",
+                    "model_id": None,
                     "reasoning_profile": "standard",
                     "provider_reasoning_effort": "normal",
                     "worker_type": "agent-thread",
@@ -492,7 +1114,8 @@ class ValidatorCase(unittest.TestCase):
                 "worker_type": "agent-thread",
                 "worker_id": "agent-thread:fallback-1",
                 "provider": "external-cli",
-                "model_id": "external-frontier",
+                "adapter_version": "5",
+                "model_id": None,
                 "provider_reasoning_effort": "normal",
                 "resolution_reason": "compatible fallback selected external-cli",
             }
@@ -516,13 +1139,12 @@ class ValidatorCase(unittest.TestCase):
                 "fallback_policy": {
                     "mode": "strict",
                     "allowed_providers": ["external-cli"],
-                    "allow_model_substitution": False,
                     "allow_manual_monitoring": True,
                 },
                 "resolution": {
                     "provider": "external-cli",
-                    "adapter_version": "1",
-                    "model_id": "external-frontier",
+                    "adapter_version": "5",
+                    "model_id": None,
                     "reasoning_profile": "standard",
                     "provider_reasoning_effort": "normal",
                     "worker_type": "crew-worker",
@@ -540,7 +1162,8 @@ class ValidatorCase(unittest.TestCase):
                 "worker_type": "crew-worker",
                 "worker_id": "crew-worker:one",
                 "provider": "external-cli",
-                "model_id": "external-frontier",
+                "adapter_version": "5",
+                "model_id": None,
                 "provider_reasoning_effort": "normal",
                 "resolution_reason": "custom worker transport",
             }
@@ -550,7 +1173,7 @@ class ValidatorCase(unittest.TestCase):
 
     def test_resolution_keeps_generic_and_provider_reasoning_separate(self) -> None:
         task = self.worker_task()
-        task["dispatch"]["model_request"]["reasoning_profile"] = "deep"
+        task["dispatch"]["reasoning_profile"] = "deep"
         task["dispatch"]["resolution"]["reasoning_profile"] = "deep"
         task["dispatch"]["resolution"]["provider_reasoning_effort"] = "high"
         task["runs"][0]["reasoning_profile"] = "deep"
@@ -558,9 +1181,20 @@ class ValidatorCase(unittest.TestCase):
         result = self.run_task(task)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_frontier_model_satisfies_balanced_quality_request(self) -> None:
+    def test_codex_model_override_is_rejected(self) -> None:
         task = self.worker_task()
-        task["dispatch"]["model_request"]["quality"] = "balanced"
+        task["dispatch"]["resolution"]["model_id"] = "forbidden-model"
+        self.assert_invalid(task, "does not declare model routing")
+
+    def test_terminal_historical_run_keeps_original_model_metadata(self) -> None:
+        task = self.worker_task()
+        run = task["runs"][0]
+        run["status"] = "succeeded"
+        run["finished_at"] = "2026-07-13T12:30:00Z"
+        run["attempts"][0]["status"] = "succeeded"
+        run["attempts"][0]["finished_at"] = "2026-07-13T12:30:00Z"
+        run["model_id"] = "host-default"
+        task["dispatch"]["heartbeat"]["status"] = "stopped"
         result = self.run_task(task)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -572,13 +1206,12 @@ class ValidatorCase(unittest.TestCase):
                 "fallback_policy": {
                     "mode": "compatible",
                     "allowed_providers": ["external-cli"],
-                    "allow_model_substitution": False,
                     "allow_manual_monitoring": True,
                 },
                 "resolution": {
                     "provider": "external-cli",
-                    "adapter_version": "1",
-                    "model_id": "external-frontier",
+                    "adapter_version": "5",
+                    "model_id": None,
                     "reasoning_profile": "standard",
                     "provider_reasoning_effort": "normal",
                     "worker_type": "agent-thread",
@@ -596,8 +1229,8 @@ class ValidatorCase(unittest.TestCase):
                 "worker_type": "agent-thread",
                 "worker_id": "agent-thread:manual-1",
                 "provider": "external-cli",
-                "adapter_version": "1",
-                "model_id": "external-frontier",
+                "adapter_version": "5",
+                "model_id": None,
                 "provider_reasoning_effort": "normal",
                 "resolution_reason": "compatible manual monitoring fallback",
             }
@@ -607,8 +1240,8 @@ class ValidatorCase(unittest.TestCase):
 
     def test_run_must_match_dispatch_resolution(self) -> None:
         task = self.worker_task()
-        task["runs"][0]["model_id"] = "different-model"
-        self.assert_invalid(task, "model_id differs from dispatch resolution")
+        task["runs"][0]["reasoning_profile"] = "deep"
+        self.assert_invalid(task, "reasoning_profile differs from dispatch resolution")
 
     def test_resolution_must_cover_required_evidence_kinds(self) -> None:
         task = self.worker_task()

@@ -9,10 +9,14 @@
 - Worker 使用唯一机器名和可见标签，例如 `BUG-041-impl-w01` 与 `BUG-041 P1 AA 最近诊断记录 [impl w01]`。
 - `CLOSED`、`PARTIAL_VERIFIED`、Blocked 和 verified-like 状态必须有 Evidence。
 - Browser/API/SQL 等证据使用结构化 Artifact，不接受任意字符串占位。
-- Validator 检查状态矩阵、并发上限、Heartbeat、Run/Attempt/Lease、依赖环和资源锁。
-- 核心协议平台无关；Resolver 根据能力和通用模型请求选择 Adapter，实际参数写入 Resolution。
-- Adapter protocol v1 将 Worker transport、输入、超时和输出路径变成机器契约。
-- Task/Evidence 使用 Schema v2，旧文档可通过迁移脚本升级。
+- 分发任务线程每 10 分钟只增量检查 Worker 状态、Lease 和最新里程碑；触发里程碑或终态才读取相关完整事实，不创建第二个监控任务。
+- 监控或网络中断将存活状态标为 unknown 并保留 Attempt、Lease 所有权和锁；恢复后先 reconcile 原 Worker。
+- 普通可恢复问题留在同一 Worker/Attempt；只有安全边界或冻结设计变化才新建 Attempt。
+- Validator 检查状态矩阵、硬 Blocker、并发上限、Run/Attempt/Lease、依赖环和资源锁。
+- 精简质量检查契约让 Gate Policy 自动校验测试、静态分析、安全检查和 Review Evidence，不增加 Lifecycle 状态。
+- 核心协议平台无关；Resolver 根据能力和通用思考强度选择 Adapter，Codex 子 Worker 跟随发布端的默认模型配置。
+- Adapter protocol v2 将续接、等待、恢复、终态收集、幂等和状态映射变成机器契约。
+- Task v4 保存稳定契约，Runtime v1 保存运行态和事件游标，Evidence 使用 Schema v2；嵌入式 Task v3 可迁移。
 
 ## 安装
 
@@ -46,22 +50,22 @@ attempt_id:   attempt-BUG-041-impl-w01-a01
 | 策略 | 用途 |
 | --- | --- |
 | `direct` | 当前线程处理低风险小任务，不创建 Worker 运行态 |
-| `single-worker` | 一个 Worker 完成实现和验证 |
+| `single-worker` | 一个任务级粘性 Worker 跨 Run/Gate 完成实现和验证 |
 | `batch-worker` | 2-4 个相似任务共享 Worker，结论保持独立 |
 | `full-dispatch` | 跨工程、数据库、发布、迁移和高风险真实链路 |
 
-## 模型适配
+## 思考强度适配
 
-核心层只使用四档 `reasoning_profile`。Codex Adapter 当前使用 `gpt-5.6-sol`，映射如下：
+核心层只使用四档 `reasoning_profile`，不允许 Task 直接指定模型。Codex Adapter 不传 `model`，子 Worker 跟随发布端的默认模型配置；档位只映射 Codex 思考强度。发布任务的临时模型覆盖不会被自动复制。
 
-| 通用档位 | Codex 参数 |
-| --- | --- |
-| `fast` | `low` |
-| `standard` | `medium` |
-| `deep` | `high` |
-| `critical` | `xhigh` |
+| 通用档位 | 模型来源 | Codex 思考强度 |
+| --- | --- | --- |
+| `fast` | 发布端默认 | 继承 |
+| `standard` | 发布端默认 | 继承 |
+| `deep` | 发布端默认 | `high` |
+| `critical` | 发布端默认 | `high` |
 
-具体策略由 [codex.adapter.json](references/adapters/codex.adapter.json) 定义。[external-cli.adapter.json](references/adapters/external-cli.adapter.json) 证明其它平台可以使用不同 Worker 命令、监控模式和推理参数，不需要修改核心 Schema。
+具体策略由 [codex.adapter.json](references/adapters/codex.adapter.json) 定义；其它平台仍可按自身能力声明模型路由。
 
 ```bash
 python3 scripts/resolve_pm_dispatch.py docs/tasks/BUG-041/task.yaml --write
@@ -76,12 +80,13 @@ Validator 会检查：
 - 终态 Evidence 存在且 conclusion 匹配。
 - Artifact 结构、时间、结果和 L0-L4 引用有效。
 - 活跃 Run 有真实 Worker ID、唯一 Attempt 和有效 Lease。
-- Heartbeat 元数据和并发上限有效。
+- 10 分钟同线程增量 Heartbeat、触发式全文收口、断网所有权保护、Worker 复用和并发上限有效。
 - Board 依赖存在且无环。
 - Active resource lock 绑定 Active Run，且不超过 Run Lease。
 
 ```bash
 python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml
+python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml --automation-dir ~/.codex/automations
 python3 scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
 ```
 
@@ -89,6 +94,7 @@ python3 scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
 
 ```bash
 python3 -m unittest discover -s tests -v
+python3 scripts/validate_skill_consistency.py
 python3 -m py_compile scripts/*.py tests/*.py
 for file in references/schemas/*.json references/adapters/*.adapter.json; do python3 -m json.tool "$file" >/dev/null; done
 ```
@@ -100,7 +106,7 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks
 python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 ```
 
-写回前会验证完整 v2 输出，原文件保存为 `.v1.bak`，再通过原子替换更新。任务面板使用确定性状态映射和快照测试：
+写回前会验证 Task v4、Runtime v1 或 Evidence v2 输出；原 Task/Evidence 按源版本备份，Runtime 与空事件日志作为 sidecar 创建。任务面板使用确定性状态映射和快照测试：
 
 ```bash
 python3 scripts/render_task_panel.py --tasks-dir docs/tasks
@@ -110,14 +116,21 @@ python3 scripts/render_task_panel.py --tasks-dir docs/tasks
 
 - `SKILL.md`：触发后的操作顺序和按需读取路由。
 - `references/core-contract.md`：平台无关的不变量。
+- `references/task-examples.md`：Task、Worker Runtime 和 Evidence 结构示例。
+- `references/prompts.md`：Worker 与 Heartbeat Prompt。
+- `references/autonomy.md`：不确定性、恢复预算与硬 Blocker 判定。
+- `references/task-panel.md`：任务面板展示合同。
+- `references/closure.md`：终态 Gate 和用户收口报告。
 - `references/adapters/*.adapter.json`：机器可读 Provider 策略。
 - `references/adapters/*.md`：Provider 操作说明。
-- `references/operating-model.md`：目录、Task、Evidence 和 Prompt 示例。
 - `references/schemas/`：正式数据结构。
 - `scripts/validate_pm_dispatch.py`：Gate、依赖图和资源锁校验。
-- `scripts/resolve_pm_dispatch.py`：能力、模型和回退策略解析。
+- `scripts/validate_skill_consistency.py`：检查监控周期、协议版本和 Runtime 契约跨文件一致。
+- `scripts/resolve_pm_dispatch.py`：能力、思考强度和 Provider 回退策略解析。
 - `scripts/adapter_protocol.py`：构建 Worker 操作 envelope 并解析 Provider 结果。
-- `scripts/migrate_pm_dispatch.py`：旧格式到 Schema v2 的保守迁移。
+- `scripts/reconcile_worker_liveness.py`：确定性处理续租、断线宽限、Attempt 过期和锁释放。
+- `scripts/record_runtime_event.py`：校验并追加不可变 Runtime Event，拒绝重复 ID 和时间倒序。
+- `scripts/migrate_pm_dispatch.py`：嵌入式 Task 到 Task v4/Runtime v1、旧 Evidence 到 v2 的保守迁移。
 - `scripts/render_task_panel.py`：固定五列任务面板渲染。
 - `tests/`：契约、Resolver、迁移和 Gate 持久回归测试。
 

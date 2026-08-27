@@ -4,7 +4,7 @@
   "title": "PM Dispatch Evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "task_id", "generated_at", "verification", "artifacts", "runs", "blockers", "conclusion"],
+  "required": ["schema_version", "task_id", "generated_at", "verification", "quality_checks", "artifacts", "runs", "blockers", "conclusion"],
   "properties": {
     "schema_version": {"type": "string", "enum": ["2"]},
     "task_id": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"},
@@ -31,6 +31,23 @@
         },
         "existing_data_regression": {"type": "string"},
         "uncovered_items": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "quality_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "tool", "summary", "evidence_refs", "skip_reason", "checked_at"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+          "status": {"type": "string", "enum": ["pending", "passed", "failed", "skipped", "blocked"]},
+          "tool": {"type": ["string", "null"], "minLength": 1},
+          "summary": {"type": "string"},
+          "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "skip_reason": {"type": ["string", "null"], "minLength": 1},
+          "checked_at": {"type": ["string", "null"], "format": "date-time"}
+        }
       }
     },
     "artifacts": {
