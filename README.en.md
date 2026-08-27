@@ -106,10 +106,25 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks
 python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 ```
 
-Write mode validates Task v4, Runtime v1, or Evidence v2 output. It backs up the original Task/Evidence and creates Runtime plus an empty event-log sidecar. The task panel uses deterministic status mapping and snapshot tests:
+Write mode validates Task v4, Runtime v1, or Evidence v2 output. It backs up the original Task/Evidence and creates Runtime plus an empty event-log sidecar. The default panel shows only actionable work; other views are loaded on demand:
 
 ```bash
 python3 scripts/render_task_panel.py --tasks-dir docs/tasks
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks --view waiting-user
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks --task SPEC-042
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks --view all
+```
+
+Build and validate a lean Context Packet before dispatch. The deterministic baseline records characters, bytes, and lines without inventing model-token estimates:
+
+```bash
+python3 scripts/measure_context_baseline.py --tasks-dir docs/tasks \
+  --board docs/dispatch-board.md --output /tmp/pm-context-baseline.json
+python3 scripts/build_context_packet.py docs/tasks/SPEC-042/task.yaml \
+  --gate implementation --verification-command "python3 -m unittest"
+python3 scripts/validate_context_packet.py \
+  docs/tasks/SPEC-042/context/active-context.json \
+  --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
 ```
 
 ## Sources Of Truth
@@ -131,7 +146,10 @@ python3 scripts/render_task_panel.py --tasks-dir docs/tasks
 - `scripts/reconcile_worker_liveness.py`: deterministic renewal, disconnect grace, Attempt expiry, and lock release.
 - `scripts/record_runtime_event.py`: validates and appends immutable Runtime events while rejecting duplicate IDs and time regressions.
 - `scripts/migrate_pm_dispatch.py`: conservative migration of embedded Tasks to Task v4/Runtime v1 and legacy Evidence to v2.
-- `scripts/render_task_panel.py`: deterministic five-column task panel rendering.
+- `scripts/render_task_panel.py`: five-column views with budgets and verified RELEASE rollups.
+- `scripts/measure_context_baseline.py`: deterministic board, Task, Evidence, Prompt, and panel surface metrics.
+- `scripts/build_context_packet.py`: derives a compact Context Packet with source digests.
+- `scripts/validate_context_packet.py`: validates Packet integrity, source drift, character budgets, and prompt full-read authorization.
 - `tests/`: persistent Adapter, Resolver, migration, and Gate regression tests.
 
 Schemas, Adapter JSON, and the validator are authoritative. The README does not redefine fields.

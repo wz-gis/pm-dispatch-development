@@ -4,6 +4,7 @@
 
 ```markdown
 【稳定执行契约；所有 Worker 保持原文和顺序】
+上下文：Context Packet 是默认注入入口；只读 Packet 与其中点名的源码/Artifact，不默认全文读取 Task、Evidence、Runtime、看板或历史
 恢复：普通失败留在本 Worker/Attempt；1 次同方法重试，最多 2 种替代路径，随后 1 次聚焦复验
 通知：仅在方案确认、核心编辑完成、复验完成、不可逆边界、终态发送 1-2 句里程碑
 Lease：每条通知携带 progress_seq；终态 delegation 前更新最后进度。不要自行创建并行替代 Worker
@@ -13,15 +14,15 @@ Lease：每条通知携带 progress_seq；终态 delegation 前更新最后进�
 任务：SPEC-042 P1 WEB 新增页面
 身份：SPEC-042-impl-w01 / run-SPEC-042-impl-w01 / attempt-SPEC-042-impl-w01-a01
 Resolution：provider=codex，model_id=null（发布端默认模型），reasoning_profile=standard，provider_effort=inherit
-冻结设计：<design_fingerprint>
-目标与用户路径：<observable outcome> / <existing-user path>
-范围：允许 <repo/files>；禁止 <repos/files>
-设计约束：<frozen constraints>
-必需证据：commit、files、commands、API/SQL/Browser Artifacts、existing-data regression
-资源锁与停止条件：<locks> / <blocked conditions>
+Context Packet：<packet_path> / <packet_sha256>；先运行 validate_context_packet.py
+差量目标：<本轮唯一目标；首轮使用 Packet objective，续跑只写新增目标>
+相关源码：<exact source paths；没有则写 none>
+必需输出：commit/files、Packet 中的 evidence gaps、hard blocker/user action、next action
 ```
 
-稳定前缀不得包含 Task ID、Worker ID、时间戳、Run/Attempt、路径或进度；动态字段统一放到后缀以提高可复用前缀命中。分发前冻结设计并复制指纹。`single-worker` 续跑时继续原 Worker，只发送新 Run/Gate、设计指纹、差量目标和证据缺口，不重复粘贴 Skill、Task/Evidence 或历史。
+稳定前缀不得包含 Task ID、Worker ID、时间戳、Run/Attempt、路径或进度；动态字段统一放到后缀以提高可复用前缀命中。分发前冻结设计，运行 `build_context_packet.py`，再用 `validate_context_packet.py <packet> --prompt <prompt>` 校验来源摘要、字符预算和全文读取权限。`single-worker` 续跑复用原 Worker，只发送新 Packet SHA、新 Run/Gate、差量目标和证据缺口，不重复粘贴 Skill、Task/Evidence、Runtime 或历史。
+
+仅当 Packet 明确记录 `design-freeze-change`、`safety-boundary-change`、`contract-review`、`schema-migration`、`terminal-closure` 或 `forensic-diagnosis` 时，Prompt 才能要求全文读取；没有触发器必须 fail closed。行数不是预算，按 Packet 的字符预算执行。
 
 ## Milestone
 

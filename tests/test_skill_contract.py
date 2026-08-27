@@ -212,6 +212,27 @@ class SkillContractCase(unittest.TestCase):
         self.assertIn('"worker_replacement_reason"', schema)
         self.assertIn("requires sticky reuse across gates", validator)
 
+    def test_context_packet_is_the_default_worker_injection_contract(self) -> None:
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        prompts = (ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
+        context_schema = json.loads(
+            (ROOT / "references" / "schemas" / "context-packet.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIn("Context Packet", skill)
+        self.assertIn("Context Packet", prompts)
+        self.assertEqual(context_schema["properties"]["schema_version"]["enum"], ["1"])
+        self.assertTrue(
+            {
+                "task",
+                "execution",
+                "confirmed_facts",
+                "source_digests",
+                "packet_sha256",
+            }.issubset(set(context_schema["required"]))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,10 +106,25 @@ python3 scripts/migrate_pm_dispatch.py docs/tasks
 python3 scripts/migrate_pm_dispatch.py docs/tasks --write
 ```
 
-写回前会验证 Task v4、Runtime v1 或 Evidence v2 输出；原 Task/Evidence 按源版本备份，Runtime 与空事件日志作为 sidecar 创建。任务面板使用确定性状态映射和快照测试：
+写回前会验证 Task v4、Runtime v1 或 Evidence v2 输出；原 Task/Evidence 按源版本备份，Runtime 与空事件日志作为 sidecar 创建。默认面板只显示可行动项；其它视图按需读取：
 
 ```bash
 python3 scripts/render_task_panel.py --tasks-dir docs/tasks
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks --view waiting-user
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks --task SPEC-042
+python3 scripts/render_task_panel.py --tasks-dir docs/tasks --view all
+```
+
+分发前生成并校验精益 Context Packet；确定性基线只记录字符、字节和行数，不伪造模型 Token：
+
+```bash
+python3 scripts/measure_context_baseline.py --tasks-dir docs/tasks \
+  --board docs/dispatch-board.md --output /tmp/pm-context-baseline.json
+python3 scripts/build_context_packet.py docs/tasks/SPEC-042/task.yaml \
+  --gate implementation --verification-command "python3 -m unittest"
+python3 scripts/validate_context_packet.py \
+  docs/tasks/SPEC-042/context/active-context.json \
+  --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
 ```
 
 ## 文件职责
@@ -131,7 +146,10 @@ python3 scripts/render_task_panel.py --tasks-dir docs/tasks
 - `scripts/reconcile_worker_liveness.py`：确定性处理续租、断线宽限、Attempt 过期和锁释放。
 - `scripts/record_runtime_event.py`：校验并追加不可变 Runtime Event，拒绝重复 ID 和时间倒序。
 - `scripts/migrate_pm_dispatch.py`：嵌入式 Task 到 Task v4/Runtime v1、旧 Evidence 到 v2 的保守迁移。
-- `scripts/render_task_panel.py`：固定五列任务面板渲染。
+- `scripts/render_task_panel.py`：有视图、限额和 RELEASE 折叠的五列任务面板。
+- `scripts/measure_context_baseline.py`：确定性测量看板、Task、Evidence、Prompt 和面板上下文表面。
+- `scripts/build_context_packet.py`：从事实源生成带来源 SHA 的精益 Context Packet。
+- `scripts/validate_context_packet.py`：校验 Packet、来源漂移、字符预算和 Prompt 全文读取权限。
 - `tests/`：契约、Resolver、迁移和 Gate 持久回归测试。
 
 机器事实源是 Schema、Adapter JSON 和 validator。README 不重新定义字段。

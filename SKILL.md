@@ -7,7 +7,7 @@ description: Use when managing software delivery through PM task boards, worker 
 
 ## Principle
 
-Task/Evidence 是事实源，Worker 是可恢复执行器；只用机器可校验的 Evidence 更新 Gate。可逆时继续推进，只有硬 Blocker 才停止。
+Task/Evidence 是事实源，Worker 是可恢复执行器；仅凭机器 Evidence 更新 Gate。可逆即推进，只有硬 Blocker 才停止。
 
 ## Fast Execution
 
@@ -20,11 +20,11 @@ Task/Evidence 是事实源，Worker 是可恢复执行器；只用机器可校�
 
 ## Load Only What You Need
 
-- 任务面板运行 `scripts/render_task_panel.py`；改格式才读 `references/task-panel.md`。
+- 面板运行 `scripts/render_task_panel.py --view actionable`；改格式读 `references/task-panel.md`。
 - 创建/修复 Task/Evidence/Runtime 或解释 Validator 错误时读 `references/core-contract.md` 和 Schema。
 - 遇到不确定性、恢复失败或准备标记 Blocked 时读取 `references/autonomy.md`。
 - 需要 YAML 示例读 `references/task-examples.md`；需要 Worker/Heartbeat Prompt 读 `references/prompts.md`。
-- 分发 Codex Worker 先运行 Resolver 和 Adapter Protocol；脚本消费 Adapter JSON，不要把 JSON 加载进上下文；执行/恢复时读 `references/adapters/codex.md`。
+- 分发先跑 Resolver/Adapter，再生成并校验 Context Packet；脚本消费 Adapter JSON，不要把 JSON 加载进上下文；Codex 细则读 `references/adapters/codex.md`。
 - 其它 Agent、CI 或人工执行读 `references/adapters/generic.md`。
 - Worker 或任务终态时读 `references/closure.md` 收口。
 - 修改本 Skill 时运行测试和 `quick_validate.py`。
@@ -33,7 +33,7 @@ Schema、Adapter、Resolver、Validator 是机器事实源。Task v4 保存契�
 
 ## Naming
 
-机器 ID 使用 `BUG-041`；可见名称使用 `BUG-041 P1 AA 最近诊断记录`。Worker、Run、Attempt 使用 `BUG-041-impl-w01`、`run-BUG-041-impl-w01`、`attempt-BUG-041-impl-w01-a01`。类型支持 `BUG`、`SPEC`、`ONBOARD`、`RELEASE`、`ENV`、`CHORE`。
+ID 用 `BUG-041`；Worker/Run/Attempt 用 `BUG-041-impl-w01`、`run-BUG-041-impl-w01`、`attempt-BUG-041-impl-w01-a01`。类型支持 `BUG`、`SPEC`、`ONBOARD`、`RELEASE`、`ENV`、`CHORE`。
 
 ## Strategy
 
@@ -47,7 +47,7 @@ Schema、Adapter、Resolver、Validator 是机器事实源。Task v4 保存契�
 ## Workflow
 
 1. **Inspect**
-   - 读取看板、相关 Task/Evidence、Decision、活跃 Run/Lease、依赖和锁；编辑前检查 Git。
+   - 读取 actionable 面板和 Context Packet；仅在受保护触发器出现时全文读取 Task/Evidence/Runtime/历史；编辑前检查 Git。
 
 2. **Define**
    - 确定类型、优先级、Area、策略、`reasoning_profile`、能力和验收表面。
@@ -61,11 +61,12 @@ Schema、Adapter、Resolver、Validator 是机器事实源。Task v4 保存契�
 4. **Dispatch**
    - 运行 Resolver 生成 `resolution`；Task 不接受用户模型 ID。Codex 子 Worker 不传 `model`，跟随发布端的 Codex 默认模型配置；`reasoning_profile` 只映射思考强度。
    - 用 Adapter v2 的 create/send/wait/rebind/collect 执行和续接；幂等键、Worker ID、token、cursor、Run/Attempt/Lease 和锁写入 Runtime，不得伪造 running。
-   - 默认使用用户可见 Worker；只有用户明确允许时使用内部 sub-agent。
-   - 分发任务线程每 10 分钟增量检查 Runtime 中的 Worker 状态、Lease、最新里程碑；仅在触发条件出现时全文收口，不得再创建独立监控 Worker/任务。
-   - 监控自身不可用时标记 `liveness_state=unknown`，保留 Attempt、Lease 所有权和资源锁；恢复后先 reconcile 原 Worker。只有 Provider 确认身份不可恢复且宽限复查失败才允许替换，避免重复分发。
+   - 默认使用用户可见 Worker；用户明确允许才使用内部 sub-agent。
+   - 分发任务线程每 10 分钟增量检查 Worker、Lease、里程碑；触发时才全文收口，不得再创建独立监控 Worker/任务。
+   - 监控不可用时标 `liveness_state=unknown` 并保留 Attempt/Lease/锁；恢复后先 reconcile 原 Worker。Provider 确认不可恢复且宽限复查失败才替换。
    - `single-worker` 的新 Run 和 Gate 默认沿用原 `worker_id`；换 Worker 必须记录允许的 `worker_replacement_reason`，普通 Gate 切换、补测试或补 Evidence 不是替换理由。
    - 只有安全边界或受保护的冻结设计指纹变化时，取消当前 Attempt 并新建 Attempt；普通可恢复问题留在同一 Worker/Attempt 内修复。
+   - Worker Prompt 必须通过 Context Packet 来源摘要、字符预算和全文读取权限校验；续跑只发送新 Packet SHA、Gate 和差量。
 
 5. **Verify and close**
    - 回收 commit、文件、命令、API、SQL、Browser、日志、质量检查和发布 Artifact；L0-L4 只能引用 Artifact ID。
@@ -74,4 +75,4 @@ Schema、Adapter、Resolver、Validator 是机器事实源。Task v4 保存契�
 
 ## Commands
 
-按相关 reference 运行面板、Resolver、协议一致性检查和 Validator。失败时修复 Task/Evidence/Runtime/Automation，或记录真实 Blocker；不得手工覆盖结论。
+按 reference 运行面板、Context Packet、Resolver、协议和 Validator。失败时修复事实源或记录真实 Blocker；不得手工覆盖结论。

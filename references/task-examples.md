@@ -225,6 +225,33 @@ last_updated: 2026-07-13T12:00:00Z
 {"schema_version":"1","event_id":"evt-SPEC-042-001","event_type":"worker-created","task_id":"SPEC-042","occurred_at":"2026-07-13T12:00:00Z","run_id":"run-SPEC-042-impl-w01","attempt_id":"attempt-SPEC-042-impl-w01-a01","provider":"codex","worker_id":"codex-thread:thread-id","payload":{"idempotency_key":"create-SPEC-042-a01"}}
 ```
 
+## Context Packet
+
+Context Packet 由脚本生成，不手写、不作为事实源。典型切片如下：
+
+```json
+{
+  "schema_version": "1",
+  "derived": true,
+  "mode": "initial",
+  "task": {"id": "SPEC-042", "schema_version": "4", "display_name": "SPEC-042 P1 WEB 新增页面", "title": "新增页面", "priority": "P1", "status": "IN_IMPL", "area": ["WEB"]},
+  "execution": {"run_id": "run-SPEC-042-impl-w01", "run_status": "running", "attempt_id": "attempt-SPEC-042-impl-w01-a01", "attempt_status": "running", "gate": "implementation", "design_fingerprint": "sha256:121c0df11c3afeca791046183aad696b7e3ca5492b81bfcbcfa5d5a21fc724d4", "latest_milestone": null},
+  "objective": "实现已冻结的新页面用户路径。",
+  "scope": {"allowed": ["src/page.tsx"], "prohibited": ["不得修改生产数据"], "constraints": []},
+  "confirmed_facts": [],
+  "open_failure": null,
+  "open_blockers": [],
+  "dependencies": [],
+  "locks": [],
+  "evidence_gaps": ["L3 Browser"],
+  "verification_commands": ["project-test-command"],
+  "budgets": {"packet_max_chars": 8000, "initial_prompt_max_chars": 6000, "continuation_prompt_max_chars": 3000, "full_read_allowed": false, "full_read_trigger": null, "full_read_triggers": ["design-freeze-change", "safety-boundary-change", "contract-review", "schema-migration", "terminal-closure", "forensic-diagnosis"]},
+  "source_digests": {"task": {"path": "../task.yaml", "sha256": "sha256:..."}, "runtime": {"path": "../runtime.yaml", "sha256": "sha256:..."}, "evidence": null},
+  "generated_at": "2026-07-13T12:00:00Z",
+  "packet_sha256": "sha256:..."
+}
+```
+
 ## Quality Checks
 
 Quality checks do not add Lifecycle phases. Commands come from the project or CI; the core records and validates results.

@@ -95,6 +95,59 @@ class TaskPanelCase(unittest.TestCase):
         rendered = self.renderer.render_task_panel([(closed, None)])
         self.assertNotIn("BUG-099", rendered)
 
+    def test_actionable_view_hides_verified_and_limits_rows(self) -> None:
+        items = [
+            (task(f"SPEC-{index:03d}", f"任务 {index}", "P1", "NEW", "执行"), None)
+            for index in range(1, 11)
+        ]
+        items.append((task("SPEC-099", "已验证", "P0", "VERIFIED", "none"), None))
+        rendered = self.renderer.render_task_panel(items)
+        self.assertNotIn("SPEC-099", rendered)
+        self.assertIn("另有 2 项", rendered)
+        self.assertNotIn("SPEC-009", rendered)
+
+    def test_waiting_user_view_uses_hard_human_gate(self) -> None:
+        waiting = task("SPEC-042", "人工授权", "P0", "ENV_BLOCKED", "等待用户")
+        waiting["blockers"] = [
+            {
+                "status": "open",
+                "hard": True,
+                "cause": "human-authorization",
+                "description": "等待用户本人完成授权",
+            }
+        ]
+        other = task("SPEC-043", "环境修复", "P0", "ENV_BLOCKED", "修环境")
+        rendered = self.renderer.render_task_panel(
+            [(waiting, None), (other, None)], view="waiting-user"
+        )
+        self.assertIn("SPEC-042", rendered)
+        self.assertNotIn("SPEC-043", rendered)
+
+    def test_verified_release_is_rolled_up_into_parent(self) -> None:
+        parent = task("SPEC-042", "父任务", "P1", "READY_FOR_CLOSURE", "收口")
+        release = task("RELEASE-042", "发布父任务", "P1", "VERIFIED", "none")
+        release["type"] = "release"
+        release["dependencies"] = {
+            "requires": [{"task_id": "SPEC-042"}],
+        }
+        rendered = self.renderer.render_task_panel([(parent, None), (release, None)])
+        self.assertIn("发布 RELEASE-042 已收口", rendered)
+        self.assertNotIn("RELEASE-042 发布父任务", rendered)
+
+    def test_all_view_can_include_closed_without_default_budget(self) -> None:
+        closed = task("BUG-099", "已关闭任务", "P0", "CLOSED", "none")
+        rendered = self.renderer.render_task_panel(
+            [(closed, None)], view="all", limit=None, max_chars=None
+        )
+        self.assertIn("BUG-099", rendered)
+
+    def test_task_lookup_bypasses_default_view(self) -> None:
+        verified = task("SPEC-099", "已验证任务", "P1", "VERIFIED", "none")
+        rendered = self.renderer.render_task_panel(
+            [(verified, None)], task_id="SPEC-099"
+        )
+        self.assertIn("SPEC-099", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

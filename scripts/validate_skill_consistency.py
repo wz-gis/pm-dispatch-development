@@ -26,6 +26,7 @@ def validate_consistency(root: Path = ROOT) -> list[str]:
     task_schema = load_json(schema_dir / "task.schema.json")
     runtime_schema = load_json(schema_dir / "runtime.schema.json")
     adapter_schema = load_json(schema_dir / "adapter.schema.json")
+    context_schema = load_json(schema_dir / "context-packet.schema.json")
 
     task_interval = (
         task_schema["properties"]["dispatch"]["properties"]["heartbeat"]
@@ -80,6 +81,27 @@ def validate_consistency(root: Path = ROOT) -> list[str]:
         errors.append("runtime.schema.json: Runtime v1 is not declared")
     if not (schema_dir / "runtime-event.schema.json").is_file():
         errors.append("runtime-event.schema.json is missing")
+    if context_schema["properties"]["schema_version"]["enum"] != ["1"]:
+        errors.append("context-packet.schema.json: Context Packet v1 is not declared")
+    required_packet_fields = {
+        "task",
+        "execution",
+        "objective",
+        "confirmed_facts",
+        "evidence_gaps",
+        "budgets",
+        "source_digests",
+        "packet_sha256",
+    }
+    if not required_packet_fields.issubset(set(context_schema["required"])):
+        errors.append("context-packet.schema.json: required compact context fields are incomplete")
+    for script_name in (
+        "build_context_packet.py",
+        "validate_context_packet.py",
+        "measure_context_baseline.py",
+    ):
+        if not (root / "scripts" / script_name).is_file():
+            errors.append(f"scripts/{script_name} is missing")
     return errors
 
 

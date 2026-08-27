@@ -5,6 +5,7 @@
 - Naming
 - State invariants
 - Dispatch and runtime invariants
+- Lean context contract
 - Dependencies and locks
 - Evidence contract
 - Validation
@@ -85,6 +86,24 @@ Keep lifecycle, verification, blocker, and closure as separate tracks, but valid
 - Every active incremental Heartbeat interval is exactly 10 minutes. Blocked work without an active Run pauses monitoring; an explicitly active recovery Run keeps the same 10-minute check.
 - Automation schedule, Task heartbeat metadata, and `max_checks` coverage must be updated together. A heartbeat check reconciles terminal Runs before doing any further work.
 - `batch-worker` requires a `BATCH-*` ID, a human-readable batch `display_name`, and 2-4 distinct task IDs including the current task. Derive the visible Worker label from the batch display name.
+
+## Lean Context Contract
+
+`Context Packet v1` 是 Task、Runtime 和 Evidence 的确定性派生缓存，不是新的事实源。分发前由 `build_context_packet.py` 生成，必须包含来源路径与 SHA-256、当前 Run/Attempt/Gate、设计指纹、目标、范围、已确认事实、当前失败/Blocker、依赖、活动锁、证据缺口和字符预算。`packet_sha256` 排除 `generated_at`，因此来源和语义不变时重复生成保持稳定。
+
+Worker 首轮默认只接收稳定执行前缀、Context Packet 路径/SHA、差量目标和确切源码路径；同一 Worker 续跑只发送新 Packet SHA、Gate 和差量。禁止默认注入完整 Task、Evidence、Runtime、dispatch-board 或历史 Prompt。以下触发器之一必须写入 Packet，才允许全文读取：`design-freeze-change`、`safety-boundary-change`、`contract-review`、`schema-migration`、`terminal-closure`、`forensic-diagnosis`。
+
+默认预算为 Packet 8000 字符、首轮 Prompt 6000 字符、续跑 Prompt 3000 字符。复杂任务可将 Packet 提高到 16000 字符，但必须在生成命令中显式覆盖；不得用固定行数替代字符预算。生成与校验命令：
+
+```bash
+python3 scripts/build_context_packet.py docs/tasks/SPEC-042/task.yaml \
+  --gate implementation --verification-command "python3 -m unittest"
+python3 scripts/validate_context_packet.py \
+  docs/tasks/SPEC-042/context/active-context.json \
+  --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
+```
+
+来源 SHA 漂移、Packet 自身摘要漂移、超预算或未经授权的全文读取都必须在 Worker 创建前 fail closed。Context Packet 只保留当前 Gate 所需引用；详细命令、日志、SQL、DOM 和历史仍留在对应 Artifact。
 
 ## Dependencies And Locks
 
@@ -168,5 +187,8 @@ The machine sources of truth are:
 - `scripts/adapter_protocol.py`
 - `scripts/record_runtime_event.py`
 - `scripts/render_task_panel.py`
+- `scripts/measure_context_baseline.py`
+- `scripts/build_context_packet.py`
+- `scripts/validate_context_packet.py`
 - `scripts/validate_pm_dispatch.py`
 - `scripts/validate_skill_consistency.py`
