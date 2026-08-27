@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pm-dispatch.local/recovery-ledger.schema.json",
+  "title": "PM Dispatch Recovery Ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "policy", "gates", "last_updated"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1"]},
+    "task_id": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"},
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_same_method_failures", "max_failed_paths"],
+      "properties": {
+        "max_same_method_failures": {"type": "integer", "enum": [2]},
+        "max_failed_paths": {"type": "integer", "enum": [3]}
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate", "design_fingerprint", "failure", "attempts", "breaker"],
+        "properties": {
+          "gate": {"type": "string", "enum": ["contract", "implementation", "integration", "verification", "closure"]},
+          "design_fingerprint": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+          "failure": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["failure_class", "fingerprint", "diagnosis_status", "checkpoint_ref", "next_action"],
+            "properties": {
+              "failure_class": {"type": "string", "minLength": 1},
+              "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "diagnosis_status": {"type": "string", "enum": ["unknown", "diagnosing", "confirmed", "resolved"]},
+              "checkpoint_ref": {"type": ["string", "null"]},
+              "next_action": {"type": ["string", "null"]}
+            }
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["attempt_key", "failure_fingerprint", "method", "result", "artifact_refs", "recorded_at"],
+              "properties": {
+                "attempt_key": {"type": "string", "minLength": 1},
+                "failure_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "method": {"type": "string", "minLength": 1},
+                "result": {"type": "string", "enum": ["failed", "recovered"]},
+                "artifact_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+                "recorded_at": {"type": "string", "format": "date-time"}
+              }
+            }
+          },
+          "breaker": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "reason", "opened_at", "reset_at", "reset_reason"],
+            "properties": {
+              "state": {"type": "string", "enum": ["closed", "open"]},
+              "reason": {"type": ["string", "null"]},
+              "opened_at": {"type": ["string", "null"], "format": "date-time"},
+              "reset_at": {"type": ["string", "null"], "format": "date-time"},
+              "reset_reason": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "last_updated": {"type": "string", "format": "date-time"}
+  }
+}

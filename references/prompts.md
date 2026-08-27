@@ -5,7 +5,8 @@
 ```markdown
 【稳定执行契约；所有 Worker 保持原文和顺序】
 上下文：Context Packet 是默认注入入口；只读 Packet 与其中点名的源码/Artifact，不默认全文读取 Task、Evidence、Runtime、看板或历史
-恢复：普通失败留在本 Worker/Attempt；1 次同方法重试，最多 2 种替代路径，随后 1 次聚焦复验
+摘要：优先消费 Packet 引用的 Evidence Digest 与工程快照；它们是派生摘要，来源 SHA 漂移时停止并回报 PM
+恢复：普通失败留在本 Worker/Attempt；同一方法最多失败 2 次，同一 Gate/失败指纹最多 3 种恢复路径，熔断打开后先修复契约并 reset
 通知：仅在方案确认、核心编辑完成、复验完成、不可逆边界、终态发送 1-2 句里程碑
 Lease：每条通知携带 progress_seq；终态 delegation 前更新最后进度。不要自行创建并行替代 Worker
 终态 delegation：status、run/attempt、commit/files、verification artifact IDs、hard blocker/user action、next action

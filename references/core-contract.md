@@ -91,6 +91,10 @@ Keep lifecycle, verification, blocker, and closure as separate tracks, but valid
 
 `Context Packet v1` 是 Task、Runtime 和 Evidence 的确定性派生缓存，不是新的事实源。分发前由 `build_context_packet.py` 生成，必须包含来源路径与 SHA-256、当前 Run/Attempt/Gate、设计指纹、目标、范围、已确认事实、当前失败/Blocker、依赖、活动锁、证据缺口和字符预算。`packet_sha256` 排除 `generated_at`，因此来源和语义不变时重复生成保持稳定。
 
+Phase 3-6 增加三个派生输入：`current-evidence.json` 是 Evidence v2 的当前状态摘要，`project-snapshot.json` 是 Git/文件结构/焦点文件的确定性快照，`recovery-ledger.json` 是按 Gate 和失败指纹记录恢复路径的审计账本。三者都带源校验或结构校验，不替代 Task、Runtime、Evidence 事实源；默认输出到项目外临时目录。`dispatch_preflight.py` 串联生成和校验，失败时不允许进入 Worker 创建。
+
+恢复熔断按 Gate 和失败指纹计数：同一方法失败两次后必须改变恢复方法；三条不同路径均失败则开路并要求契约/设计修复与显式 reset。普通新一轮 Prompt 不是熔断重置理由。
+
 Worker 首轮默认只接收稳定执行前缀、Context Packet 路径/SHA、差量目标和确切源码路径；同一 Worker 续跑只发送新 Packet SHA、Gate 和差量。禁止默认注入完整 Task、Evidence、Runtime、dispatch-board 或历史 Prompt。以下触发器之一必须写入 Packet，才允许全文读取：`design-freeze-change`、`safety-boundary-change`、`contract-review`、`schema-migration`、`terminal-closure`、`forensic-diagnosis`。
 
 默认预算为 Packet 8000 字符、首轮 Prompt 6000 字符、续跑 Prompt 3000 字符。复杂任务可将 Packet 提高到 16000 字符，但必须在生成命令中显式覆盖；不得用固定行数替代字符预算。生成与校验命令：
@@ -101,6 +105,11 @@ python3 scripts/build_context_packet.py docs/tasks/SPEC-042/task.yaml \
 python3 scripts/validate_context_packet.py \
   docs/tasks/SPEC-042/context/active-context.json \
   --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
+
+python3 scripts/dispatch_preflight.py docs/tasks/SPEC-042/task.yaml \
+  --project-root . --gate implementation \
+  --focus frontend/app/page.tsx \
+  --verification-command "python3 -m unittest"
 ```
 
 来源 SHA 漂移、Packet 自身摘要漂移、超预算或未经授权的全文读取都必须在 Worker 创建前 fail closed。Context Packet 只保留当前 Gate 所需引用；详细命令、日志、SQL、DOM 和历史仍留在对应 Artifact。

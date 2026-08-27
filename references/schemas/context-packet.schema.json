@@ -19,6 +19,8 @@
     "locks",
     "evidence_gaps",
     "verification_commands",
+    "machine_snapshot",
+    "recovery",
     "budgets",
     "source_digests",
     "generated_at",
@@ -153,6 +155,44 @@
     },
     "evidence_gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "verification_commands": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "machine_snapshot": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["git_head", "branch", "dirty_paths", "scanned_files", "focus"],
+      "properties": {
+        "git_head": {"type": ["string", "null"]},
+        "branch": {"type": ["string", "null"]},
+        "dirty_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "scanned_files": {"type": "integer", "minimum": 0},
+        "focus": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "state", "sha256"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "state": {"type": "string", "enum": ["file", "directory", "missing"]},
+              "sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "recovery": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["gate", "state", "failure_fingerprint", "failed_attempt_count", "failed_paths", "remaining_paths", "next_action"],
+      "properties": {
+        "gate": {"type": "string", "enum": ["contract", "implementation", "integration", "verification", "closure"]},
+        "state": {"type": "string", "enum": ["closed", "open"]},
+        "failure_fingerprint": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "failed_attempt_count": {"type": "integer", "minimum": 0},
+        "failed_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "remaining_paths": {"type": "integer", "minimum": 0},
+        "next_action": {"type": ["string", "null"]}
+      }
+    },
     "budgets": {
       "type": "object",
       "additionalProperties": false,
@@ -178,11 +218,14 @@
     "source_digests": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task", "runtime", "evidence"],
+      "required": ["task", "runtime", "evidence", "evidence_digest", "project_snapshot", "recovery_ledger"],
       "properties": {
         "task": {"$ref": "#/$defs/source_digest"},
         "runtime": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
-        "evidence": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}
+        "evidence": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+        "evidence_digest": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+        "project_snapshot": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
+        "recovery_ledger": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}
       }
     },
     "generated_at": {"type": "string", "format": "date-time"},

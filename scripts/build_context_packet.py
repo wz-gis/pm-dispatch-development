@@ -21,6 +21,9 @@ from validate_context_packet import (  # noqa: E402
     packet_digest,
     validate_context_packet,
 )
+from build_project_snapshot import validate_project_snapshot  # noqa: E402
+from manage_recovery_ledger import breaker_summary, validate_ledger  # noqa: E402
+from validate_evidence_digest import validate_evidence_digest  # noqa: E402
 from validate_pm_dispatch import (  # noqa: E402
     assert_supported_schema,
     compose_task_runtime,
@@ -154,6 +157,22 @@ def facts_from_evidence(evidence: dict[str, Any] | None) -> list[dict[str, Any]]
     return facts[:8]
 
 
+def facts_from_digest(digest: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not digest:
+        return []
+    return [
+        {
+            "claim": compact_text(item.get("claim"), 350),
+            "status": item.get("status"),
+            "artifact_ids": compact_list(
+                item.get("artifact_ids", []), item_limit=120, count_limit=6
+            ),
+        }
+        for item in digest.get("confirmed_facts", [])[:8]
+        if isinstance(item, dict) and item.get("claim")
+    ]
+
+
 def open_blockers_from_task(task: dict[str, Any]) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     for blocker in task.get("blockers", []):
@@ -222,6 +241,75 @@ def evidence_gaps(task: dict[str, Any], evidence: dict[str, Any] | None) -> list
     return compact_list(values, item_limit=300, count_limit=10)
 
 
+def evidence_gaps_from_digest(
+    task: dict[str, Any], digest: dict[str, Any] | None
+) -> list[str]:
+    values: list[Any] = list(task.get("verification", {}).get("missing", []))
+    if digest:
+        values.extend(digest.get("current_state", {}).get("uncovered_items", []))
+        for check in digest.get("quality_checks", []):
+            if not isinstance(check, dict) or check.get("status") not in {
+                "pending",
+                "failed",
+                "blocked",
+            }:
+                continue
+            values.append(
+                f"质量检查 {check.get('id')}: "
+                f"{compact_text(check.get('summary') or check.get('status'), 300)}"
+            )
+    return compact_list(values, item_limit=300, count_limit=10)
+
+
+def compact_machine_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not snapshot:
+        return None
+    return {
+        "git_head": snapshot.get("git", {}).get("head"),
+        "branch": snapshot.get("git", {}).get("branch"),
+        "dirty_paths": compact_list(
+            snapshot.get("git", {}).get("dirty_paths", []),
+            item_limit=180,
+            count_limit=20,
+        ),
+        "scanned_files": int(snapshot.get("file_index", {}).get("scanned_files") or 0),
+        "focus": [
+            {
+                "path": compact_text(item.get("path"), 220),
+                "state": item.get("state"),
+                "sha256": item.get("sha256"),
+            }
+            for item in snapshot.get("focus", [])[:12]
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def recovery_for_gate(
+    ledger: dict[str, Any] | None, gate: str | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not ledger or not gate:
+        return None, None
+    entry = next((item for item in ledger.get("gates", []) if item.get("gate") == gate), None)
+    if not entry:
+        return None, None
+    summary = breaker_summary(entry)
+    failure = entry.get("failure")
+    if not failure:
+        return summary, None
+    open_failure = {
+        "failure_class": failure["failure_class"],
+        "failure_phase": gate,
+        "diagnosis_status": failure["diagnosis_status"],
+        "fingerprint": failure["fingerprint"],
+        "repeat_count": summary["failed_attempt_count"],
+        "checkpoint_ref": failure.get("checkpoint_ref"),
+        "forbidden_retries": summary["failed_paths"],
+        "next_diagnostic_action": failure.get("next_action"),
+    }
+    return summary, open_failure
+
+
 def shrink_packet(packet: dict[str, Any]) -> None:
     packet["objective"] = compact_text(packet.get("objective"), 500)
     for key in ("allowed", "prohibited", "constraints"):
@@ -252,6 +340,11 @@ def shrink_packet(packet: dict[str, Any]) -> None:
     packet["evidence_gaps"] = compact_list(
         packet.get("evidence_gaps", []), item_limit=220, count_limit=6
     )
+    if packet.get("machine_snapshot"):
+        packet["machine_snapshot"]["dirty_paths"] = packet["machine_snapshot"][
+            "dirty_paths"
+        ][:8]
+        packet["machine_snapshot"]["focus"] = packet["machine_snapshot"]["focus"][:6]
 
 
 def build_context_packet(
@@ -268,6 +361,9 @@ def build_context_packet(
     initial_prompt_max_chars: int = 6000,
     continuation_prompt_max_chars: int = 3000,
     full_read_trigger: str | None = None,
+    evidence_digest_path: Path | None = None,
+    project_snapshot_path: Path | None = None,
+    recovery_ledger_path: Path | None = None,
     generated_at: str | None = None,
     schema_dir: Path | None = None,
 ) -> tuple[dict[str, Any], str]:
@@ -278,11 +374,19 @@ def build_context_packet(
     runtime_schema = load_structured_file(schema_dir / "runtime.schema.json")
     evidence_schema = load_structured_file(schema_dir / "evidence.schema.json")
     context_schema = load_structured_file(schema_dir / "context-packet.schema.json")
+    evidence_digest_schema = load_structured_file(
+        schema_dir / "evidence-digest.schema.json"
+    )
+    project_snapshot_schema = load_structured_file(
+        schema_dir / "project-snapshot.schema.json"
+    )
     for name, schema in (
         ("task.schema.json", task_schema),
         ("runtime.schema.json", runtime_schema),
         ("evidence.schema.json", evidence_schema),
         ("context-packet.schema.json", context_schema),
+        ("evidence-digest.schema.json", evidence_digest_schema),
+        ("project-snapshot.schema.json", project_snapshot_schema),
     ):
         assert_supported_schema(schema, name)
 
@@ -303,6 +407,48 @@ def build_context_packet(
         source_errors.extend(
             validate_schema(evidence, evidence_schema, str(evidence_path), evidence_schema)
         )
+
+    evidence_digest_path = evidence_digest_path or (
+        task_path.parent / "context" / "current-evidence.json"
+    )
+    evidence_digest = None
+    if evidence_digest_path.exists():
+        evidence_digest = load_structured_file(evidence_digest_path)
+        source_errors.extend(
+            validate_evidence_digest(
+                evidence_digest,
+                digest_path=evidence_digest_path,
+                schema=evidence_digest_schema,
+                rendered=evidence_digest_path.read_text(encoding="utf-8"),
+                check_source=True,
+            )
+        )
+
+    project_snapshot_path = project_snapshot_path or (
+        task_path.parent / "context" / "project-snapshot.json"
+    )
+    project_snapshot = None
+    if project_snapshot_path.exists():
+        project_snapshot = load_structured_file(project_snapshot_path)
+        source_errors.extend(
+            validate_project_snapshot(
+                project_snapshot,
+                snapshot_path=project_snapshot_path,
+                schema=project_snapshot_schema,
+                rendered=project_snapshot_path.read_text(encoding="utf-8"),
+                check_sources=True,
+            )
+        )
+
+    recovery_ledger_path = recovery_ledger_path or (
+        task_path.parent / "context" / "recovery-ledger.json"
+    )
+    recovery_ledger = None
+    if recovery_ledger_path.exists():
+        recovery_ledger = load_structured_file(recovery_ledger_path)
+        source_errors.extend(
+            validate_ledger(recovery_ledger, recovery_ledger_path, schema_dir)
+        )
     if source_errors:
         raise ValueError("invalid PM sources:\n" + "\n".join(source_errors))
 
@@ -311,6 +457,8 @@ def build_context_packet(
     attempt = select_attempt(run)
     design_freeze = effective.get("dispatch", {}).get("design_freeze") or {}
     lifecycle = effective.get("lifecycle", {})
+    effective_gate = gate or (run.get("gate") if run else None)
+    recovery, recovery_failure = recovery_for_gate(recovery_ledger, effective_gate)
     next_action = lifecycle.get("next_action")
     accepted_scope = lifecycle.get("accepted_scope")
     if objective:
@@ -400,15 +548,26 @@ def build_context_packet(
             "prohibited": prohibited,
             "constraints": constraints,
         },
-        "confirmed_facts": facts_from_evidence(evidence),
-        "open_failure": failure_from_blockers(effective, blockers),
+        "confirmed_facts": (
+            facts_from_digest(evidence_digest)
+            if evidence_digest
+            else facts_from_evidence(evidence)
+        ),
+        "open_failure": recovery_failure
+        or failure_from_blockers(effective, blockers),
         "open_blockers": blockers,
         "dependencies": dependencies,
         "locks": locks,
-        "evidence_gaps": evidence_gaps(effective, evidence),
+        "evidence_gaps": (
+            evidence_gaps_from_digest(effective, evidence_digest)
+            if evidence_digest
+            else evidence_gaps(effective, evidence)
+        ),
         "verification_commands": compact_list(
             verification_commands or [], item_limit=500, count_limit=8
         ),
+        "machine_snapshot": compact_machine_snapshot(project_snapshot),
+        "recovery": recovery,
         "budgets": {
             "packet_max_chars": packet_max_chars,
             "initial_prompt_max_chars": initial_prompt_max_chars,
@@ -421,6 +580,18 @@ def build_context_packet(
             "task": source_digest(task_path, output_path),
             "runtime": source_digest(runtime_path, output_path),
             "evidence": source_digest(evidence_path if evidence_path.exists() else None, output_path),
+            "evidence_digest": source_digest(
+                evidence_digest_path if evidence_digest_path.exists() else None,
+                output_path,
+            ),
+            "project_snapshot": source_digest(
+                project_snapshot_path if project_snapshot_path.exists() else None,
+                output_path,
+            ),
+            "recovery_ledger": source_digest(
+                recovery_ledger_path if recovery_ledger_path.exists() else None,
+                output_path,
+            ),
         },
         "generated_at": generated_at
         or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -468,6 +639,9 @@ def main() -> int:
     parser.add_argument("--initial-prompt-max-chars", type=int, default=6000)
     parser.add_argument("--continuation-prompt-max-chars", type=int, default=3000)
     parser.add_argument("--allow-full-read", choices=FULL_READ_TRIGGERS)
+    parser.add_argument("--evidence-digest")
+    parser.add_argument("--project-snapshot")
+    parser.add_argument("--recovery-ledger")
     parser.add_argument("--now", help="Stable generated_at for tests or reproducible builds")
     args = parser.parse_args()
 
@@ -490,6 +664,15 @@ def main() -> int:
         initial_prompt_max_chars=args.initial_prompt_max_chars,
         continuation_prompt_max_chars=args.continuation_prompt_max_chars,
         full_read_trigger=args.allow_full_read,
+        evidence_digest_path=(
+            Path(args.evidence_digest).resolve() if args.evidence_digest else None
+        ),
+        project_snapshot_path=(
+            Path(args.project_snapshot).resolve() if args.project_snapshot else None
+        ),
+        recovery_ledger_path=(
+            Path(args.recovery_ledger).resolve() if args.recovery_ledger else None
+        ),
         generated_at=args.now,
     )
     atomic_write(output_path, rendered)

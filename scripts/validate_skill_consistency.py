@@ -95,10 +95,27 @@ def validate_consistency(root: Path = ROOT) -> list[str]:
     }
     if not required_packet_fields.issubset(set(context_schema["required"])):
         errors.append("context-packet.schema.json: required compact context fields are incomplete")
+    required_source_digests = {
+        "task",
+        "runtime",
+        "evidence",
+        "evidence_digest",
+        "project_snapshot",
+        "recovery_ledger",
+    }
+    if not required_source_digests.issubset(
+        set(context_schema["properties"]["source_digests"]["required"])
+    ):
+        errors.append("context-packet.schema.json: derived source digest fields are incomplete")
     for script_name in (
         "build_context_packet.py",
         "validate_context_packet.py",
         "measure_context_baseline.py",
+        "build_evidence_digest.py",
+        "validate_evidence_digest.py",
+        "build_project_snapshot.py",
+        "manage_recovery_ledger.py",
+        "dispatch_preflight.py",
     ):
         if not (root / "scripts" / script_name).is_file():
             errors.append(f"scripts/{script_name} is missing")

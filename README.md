@@ -127,6 +127,15 @@ python3 scripts/validate_context_packet.py \
   --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
 ```
 
+Phase 3-6 的一次性预检会生成 Evidence Digest、工程快照、恢复账本和 Context Packet，默认写到项目外临时目录，减少重复扫描和 Git 污染：
+
+```bash
+python3 scripts/dispatch_preflight.py docs/tasks/SPEC-042/task.yaml \
+  --project-root . --gate implementation \
+  --focus frontend/app/page.tsx \
+  --verification-command "python3 -m unittest"
+```
+
 ## 文件职责
 
 - `SKILL.md`：触发后的操作顺序和按需读取路由。
@@ -150,6 +159,10 @@ python3 scripts/validate_context_packet.py \
 - `scripts/measure_context_baseline.py`：确定性测量看板、Task、Evidence、Prompt 和面板上下文表面。
 - `scripts/build_context_packet.py`：从事实源生成带来源 SHA 的精益 Context Packet。
 - `scripts/validate_context_packet.py`：校验 Packet、来源漂移、字符预算和 Prompt 全文读取权限。
+- `scripts/build_evidence_digest.py` / `scripts/validate_evidence_digest.py`：从 Evidence v2 派生并校验当前状态摘要。
+- `scripts/build_project_snapshot.py`：生成 Git、文件结构和焦点文件的确定性工程快照。
+- `scripts/manage_recovery_ledger.py`：按 Gate/失败指纹计数恢复路径并执行三路径熔断。
+- `scripts/dispatch_preflight.py`：串联摘要、快照、恢复账本和 Context Packet 的单入口预检。
 - `tests/`：契约、Resolver、迁移和 Gate 持久回归测试。
 
 机器事实源是 Schema、Adapter JSON 和 validator。README 不重新定义字段。
