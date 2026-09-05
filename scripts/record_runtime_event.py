@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -53,29 +54,35 @@ def append_event(
         raise RuntimeEventError("; ".join(errors))
     if event.get("task_id") != runtime.get("task_id"):
         raise RuntimeEventError("event task_id does not match Runtime task_id")
-    event_path = Path(str(runtime.get("event_log_file") or ""))
+    configured_value = str(runtime.get("event_log_file") or "").strip()
+    if not configured_value:
+        raise RuntimeEventError("Runtime requires event_log_file")
+    event_path = Path(configured_value)
     if not event_path.is_absolute():
         event_path = (runtime_path.parent / event_path).resolve()
     if not event_path.exists():
         raise RuntimeEventError(f"event log does not exist: {event_path}")
 
-    last_time: datetime | None = None
-    for lineno, line in enumerate(event_path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            existing = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeEventError(f"existing event {lineno} is invalid: {exc}") from exc
-        if existing.get("event_id") == event.get("event_id"):
-            raise RuntimeEventError(f"duplicate event_id {event.get('event_id')!r}")
-        last_time = parse_time(existing.get("occurred_at"))
-    event_time = parse_time(event.get("occurred_at"))
-    if last_time and event_time < last_time:
-        raise RuntimeEventError("event occurred_at is earlier than the current log tail")
+    with event_path.open("r+", encoding="utf-8") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+        stream.seek(0)
+        last_time: datetime | None = None
+        for lineno, line in enumerate(stream.read().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                existing = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeEventError(f"existing event {lineno} is invalid: {exc}") from exc
+            if existing.get("event_id") == event.get("event_id"):
+                raise RuntimeEventError(f"duplicate event_id {event.get('event_id')!r}")
+            last_time = parse_time(existing.get("occurred_at"))
+        event_time = parse_time(event.get("occurred_at"))
+        if last_time and event_time < last_time:
+            raise RuntimeEventError("event occurred_at is earlier than the current log tail")
 
-    if write:
-        with event_path.open("a", encoding="utf-8") as stream:
+        if write:
+            stream.seek(0, os.SEEK_END)
             stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
             stream.flush()
             os.fsync(stream.fileno())

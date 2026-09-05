@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -21,23 +19,14 @@ from validate_pm_dispatch import (  # noqa: E402
     load_structured_file,
     validate_schema,
 )
-
-
-def canonical_payload(digest: dict[str, Any]) -> bytes:
-    payload = copy.deepcopy(digest)
-    payload.pop("generated_at", None)
-    payload.pop("digest_sha256", None)
-    return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+from context_source_digest import (  # noqa: E402
+    evidence_digest_identity,
+    file_sha256,
+)
 
 
 def digest_sha256(digest: dict[str, Any]) -> str:
-    return "sha256:" + hashlib.sha256(canonical_payload(digest)).hexdigest()
-
-
-def file_sha256(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return evidence_digest_identity(digest)
 
 
 def resolve_source(digest_path: Path, configured: str) -> Path:

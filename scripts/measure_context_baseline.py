@@ -15,8 +15,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from render_task_panel import load_panel_items, render_task_panel  # noqa: E402
-from validate_pm_dispatch import load_structured_file  # noqa: E402
+from render_task_panel import render_task_panel  # noqa: E402
+from validate_pm_dispatch import TASK_ID_RE, TYPE_BY_PREFIX, load_structured_file  # noqa: E402
 
 
 def file_metrics(path: Path, root: Path) -> dict[str, Any]:
@@ -40,6 +40,7 @@ def collect_context_baseline(
     board_path: Path | None = None,
     top: int = 10,
     generated_at: str | None = None,
+    canonical_only: bool = False,
 ) -> dict[str, Any]:
     tasks_dir = tasks_dir.resolve()
     project_root = tasks_dir.parent.parent
@@ -48,8 +49,26 @@ def collect_context_baseline(
     evidence_paths: set[Path] = set()
     prompt_paths: list[Path] = []
     schema_versions: dict[str, int] = {}
+    task_types: dict[str, int] = {}
+    selected_paths: list[Path] = []
+    selected_ids: set[str] = set()
+    items = []
     for task_path in task_paths:
         task = load_structured_file(task_path)
+        task_id = str(task.get("id") or (task.get("taskId") if canonical_only else "") or "")
+        if canonical_only and (
+            not TASK_ID_RE.fullmatch(task_id)
+            or task_path.parent.name != task_id
+            or task_id in selected_ids
+        ):
+            continue
+        if canonical_only:
+            task = dict(task, id=task_id)
+            task.setdefault("type", TYPE_BY_PREFIX[task_id.split("-", 1)[0]])
+        selected_paths.append(task_path)
+        selected_ids.add(task_id)
+        task_type = str(task.get("type") or "unknown")
+        task_types[task_type] = task_types.get(task_type, 0) + 1
         version = str(task.get("schema_version") or "unknown")
         schema_versions[version] = schema_versions.get(version, 0) + 1
         evidence_name = task.get("verification", {}).get("evidence_file") or "evidence.yaml"
@@ -58,6 +77,8 @@ def collect_context_baseline(
             evidence_path = task_path.parent / evidence_path
         if evidence_path.exists():
             evidence_paths.add(evidence_path.resolve())
+        evidence = load_structured_file(evidence_path) if evidence_path.is_file() else None
+        items.append((task, evidence))
         prompt_dir = task_path.parent / "prompts"
         if prompt_dir.is_dir():
             prompt_paths.extend(
@@ -66,7 +87,7 @@ def collect_context_baseline(
                 if path.is_file() and path.suffix.lower() in {".md", ".txt", ".yaml", ".json"}
             )
 
-    surfaces = [file_metrics(path, project_root) for path in task_paths]
+    surfaces = [file_metrics(path, project_root) for path in selected_paths]
     surfaces.extend(file_metrics(path, project_root) for path in sorted(evidence_paths))
     surfaces.extend(file_metrics(path, project_root) for path in prompt_paths)
     board_metrics = None
@@ -74,7 +95,6 @@ def collect_context_baseline(
         board_metrics = file_metrics(board_path.resolve(), project_root)
         surfaces.append(board_metrics)
 
-    items = load_panel_items(tasks_dir)
     actionable = render_task_panel(items)
     full = render_task_panel(items, view="all", limit=None, max_chars=None)
     largest = sorted(surfaces, key=lambda item: (-item["chars"], item["path"]))[:top]
@@ -83,7 +103,9 @@ def collect_context_baseline(
         "generated_at": generated_at
         or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "tasks_dir": str(tasks_dir),
-        "task_count": len(task_paths),
+        "task_count": len(selected_paths),
+        "excluded_task_documents": len(task_paths) - len(selected_paths),
+        "task_types": task_types,
         "task_schema_versions": dict(sorted(schema_versions.items())),
         "evidence_file_count": len(evidence_paths),
         "prompt_file_count": len(prompt_paths),
@@ -103,6 +125,50 @@ def collect_context_baseline(
         "largest_surfaces": largest,
         "note": "字符和字节是确定性基线；未使用模型相关 Token 估算。",
     }
+
+
+def public_context_baseline(report: dict[str, Any]) -> dict[str, Any]:
+    """Export only numeric aggregates and fixed labels, never source strings."""
+    known_types = set(TYPE_BY_PREFIX.values())
+    type_counts = {key: 0 for key in sorted(known_types | {"unknown"})}
+    for key, count in report.get("task_types", {}).items():
+        type_counts[key if key in known_types else "unknown"] += int(count)
+    board_chars = report["board"]["chars"] if report.get("board") else None
+    all_chars = report["panels"]["all"]["chars"]
+    actionable_chars = report["panels"]["actionable"]["chars"]
+    stamp = datetime.fromisoformat(str(report["generated_at"]).replace("Z", "+00:00"))
+    return {
+        "schema_version": "1",
+        "public_aggregate": True,
+        "measured_on": stamp.date().isoformat(),
+        "selection": "One project; canonical task directories; legacy taskId normalized; IDs deduplicated.",
+        "task_count": report["task_count"],
+        "excluded_task_documents": report["excluded_task_documents"],
+        "task_types": type_counts,
+        "evidence_file_count": report["evidence_file_count"],
+        "prompt_file_count": report["prompt_file_count"],
+        "source_chars": report["totals"]["chars"],
+        "board_chars": board_chars,
+        "all_panel_chars": all_chars,
+        "actionable_panel_chars": actionable_chars,
+        "actionable_vs_all_reduction_pct": (
+            round(100 * (1 - actionable_chars / all_chars), 2) if all_chars else None
+        ),
+        "actionable_vs_board_reduction_pct": (
+            round(100 * (1 - actionable_chars / board_chars), 2) if board_chars else None
+        ),
+        "measurement": "Unicode character counts, not model tokens, cost, or elapsed time.",
+    }
+
+
+def render_public_markdown(report: dict[str, Any]) -> str:
+    lines = ["# Anonymous Context Baseline", "", "| Metric | Value |", "| --- | ---: |"]
+    for key, value in report.items():
+        if isinstance(value, dict):
+            lines.extend(f"| task_types.{kind} | {count} |" for kind, count in value.items())
+        else:
+            lines.append(f"| {key} | {value} |")
+    return "\n".join(lines) + "\n"
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -136,6 +202,7 @@ def main() -> int:
     parser.add_argument("--format", choices=["json", "markdown"], default="json")
     parser.add_argument("--output")
     parser.add_argument("--now")
+    parser.add_argument("--public", action="store_true", help="Export anonymous canonical-task aggregates only")
     args = parser.parse_args()
     if args.top < 1:
         parser.error("--top must be at least 1")
@@ -145,17 +212,20 @@ def main() -> int:
         board_path=Path(args.board) if args.board else None,
         top=args.top,
         generated_at=args.now,
+        canonical_only=args.public,
     )
+    if args.public:
+        report = public_context_baseline(report)
     rendered = (
         json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         if args.format == "json"
-        else render_markdown(report)
+        else (render_public_markdown(report) if args.public else render_markdown(report))
     )
     if args.output:
         output = Path(args.output).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered, encoding="utf-8")
-        print(f"Wrote {output}")
+        print("Wrote public aggregate report." if args.public else f"Wrote {output}")
     else:
         print(rendered, end="")
     return 0

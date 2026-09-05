@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -53,6 +53,7 @@ class LivenessCase(unittest.TestCase):
 
     def test_live_probe_renews_same_attempt_and_preserves_progress(self) -> None:
         source = self.task()
+        source["runs"][0]["attempts"][0]["lease"]["last_progress_at"] = "2026-07-13T12:50:00Z"
         result, outcome = self.module.reconcile_liveness(
             source,
             source["runs"][0]["run_id"],
@@ -135,6 +136,101 @@ class LivenessCase(unittest.TestCase):
             datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc),
         )
         self.assertEqual(source, original)
+
+    def test_idle_interrupted_keeps_identity_and_ownership_without_claiming_success(self) -> None:
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+        result, outcome = self.module.reconcile_liveness(
+            source, run_id, "idle", now, latest_turn_status="interrupted"
+        )
+        run = result["runs"][0]
+        self.assertEqual(outcome, "diagnosis-required")
+        self.assertEqual(run["observation"]["reason"], "interrupted")
+        self.assertEqual(run["status"], "queued")
+        self.assertEqual(run["worker_id"], source["runs"][0]["worker_id"])
+        self.assertEqual(run["attempts"][0]["attempt_id"], source["runs"][0]["attempts"][0]["attempt_id"])
+        self.assertEqual(result["resources"]["locks"][0]["status"], "active")
+        self.assertIsNone(run["finished_at"])
+        repeated, outcome = self.module.reconcile_liveness(result, run_id, "idle", now + timedelta(minutes=10))
+        self.assertEqual(outcome, "awaiting-diagnosis")
+        self.assertEqual(repeated["runs"][0]["observation"]["attention_at"], run["observation"]["attention_at"])
+
+    def test_stale_running_worker_requests_one_diagnosis_until_real_progress(self) -> None:
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+        first, outcome = self.module.reconcile_liveness(source, run_id, "running", now)
+        self.assertEqual(outcome, "diagnosis-required")
+        self.assertEqual(first["runs"][0]["observation"]["reason"], "no-progress")
+        second, outcome = self.module.reconcile_liveness(first, run_id, "running", now + timedelta(minutes=10))
+        self.assertEqual(outcome, "awaiting-diagnosis")
+        lease = second["runs"][0]["attempts"][0]["lease"]
+        lease["progress_seq"] += 1
+        lease["last_progress_at"] = "2026-07-13T13:15:00Z"
+        third, outcome = self.module.reconcile_liveness(second, run_id, "running", now + timedelta(minutes=20))
+        self.assertEqual(outcome, "renewed-same-attempt")
+        self.assertEqual(third["runs"][0]["observation"]["state"], "active")
+
+    def test_verified_long_command_has_fixed_deadline_not_infinite_renewal(self) -> None:
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+        first, outcome = self.module.reconcile_liveness(
+            source, run_id, "running", now,
+            command_id="build-session-1", command_deadline="2026-07-13T13:25:00Z"
+        )
+        self.assertEqual(outcome, "renewed-same-attempt")
+        self.assertEqual(first["runs"][0]["observation"]["state"], "waiting-command")
+        second, outcome = self.module.reconcile_liveness(first, run_id, "running", now + timedelta(minutes=10))
+        self.assertEqual(outcome, "renewed-same-attempt")
+        with self.assertRaisesRegex(ValueError, "cannot be extended"):
+            self.module.reconcile_liveness(
+                second, run_id, "running", now + timedelta(minutes=20),
+                command_id="build-session-1", command_deadline="2026-07-13T14:00:00Z"
+            )
+        _, outcome = self.module.reconcile_liveness(second, run_id, "running", now + timedelta(minutes=30))
+        self.assertEqual(outcome, "diagnosis-required")
+
+    def test_confirmed_terminal_reconciliation_is_idempotent(self) -> None:
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+        first, outcome = self.module.reconcile_liveness(source, run_id, "succeeded", now)
+        self.assertEqual(outcome, "terminal-succeeded")
+        second, outcome = self.module.reconcile_liveness(first, run_id, "idle", now + timedelta(minutes=10))
+        self.assertEqual(outcome, "terminal-already-reconciled")
+        self.assertEqual(first, second)
+        self.assertEqual(second["resources"]["locks"][0]["status"], "released")
+
+    def test_one_diagnosis_can_identify_a_legitimate_running_command(self) -> None:
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+        first, outcome = self.module.reconcile_liveness(source, run_id, "running", now)
+        self.assertEqual(outcome, "diagnosis-required")
+        second, outcome = self.module.reconcile_liveness(
+            first, run_id, "running", now + timedelta(minutes=1),
+            command_id="build-1", command_deadline="2026-07-13T13:25:00Z"
+        )
+        self.assertEqual(outcome, "renewed-same-attempt")
+        self.assertEqual(second["runs"][0]["observation"]["state"], "waiting-command")
+        _, outcome = self.module.reconcile_liveness(second, run_id, "running", now + timedelta(minutes=30))
+        self.assertEqual(outcome, "diagnosis-required")
+
+    def test_observation_schema_and_context_digest_ignore_status_only_time(self) -> None:
+        from context_source_digest import runtime_context_projection
+        from validate_pm_dispatch import validate_schema
+
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 12, 10, tzinfo=timezone.utc)
+        first, _ = self.module.reconcile_liveness(source, run_id, "running", now)
+        second, _ = self.module.reconcile_liveness(first, run_id, "running", now + timedelta(minutes=10))
+        schema = json.loads((ROOT / "references/schemas/runtime.schema.json").read_text())
+        errors = validate_schema(first["runs"][0]["observation"], schema["$defs"]["observation"], "observation", schema)
+        self.assertEqual(errors, [])
+        self.assertEqual(runtime_context_projection(first), runtime_context_projection(second))
 
     def test_cli_resolves_task_v4_runtime_sidecar(self) -> None:
         runtime = self.task()

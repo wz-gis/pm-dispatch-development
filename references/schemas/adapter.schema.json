@@ -52,9 +52,10 @@
         "worker": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["transport", "create", "send", "inspect", "wait", "rebind", "collect", "cancel", "supports_background"],
+          "required": ["transport", "visibility", "create", "send", "inspect", "wait", "rebind", "collect", "cancel", "supports_background"],
           "properties": {
             "transport": {"type": "string", "enum": ["tool", "command", "api", "manual"]},
+            "visibility": {"type": "string", "enum": ["user-visible", "provider-visible", "internal"]},
             "create": {"$ref": "#/$defs/worker_operation"},
             "send": {"$ref": "#/$defs/worker_operation"},
             "inspect": {"$ref": "#/$defs/worker_operation"},
@@ -112,9 +113,14 @@
               "items": {"type": "string", "enum": ["event-lease", "milestone", "heartbeat", "poll", "manual"]}
             },
             "supports_lease_renewal": {"type": "boolean"},
+            "heartbeat_operation": {"type": "string", "minLength": 1},
             "heartbeat_target": {"type": "string", "enum": ["coordinator-thread"]},
+            "coordinator_binding": {"type": "string", "enum": ["current-conversation", "declared-thread", "provider-managed"]},
             "event_wait_target": {"type": ["string", "null"], "minLength": 1},
-            "disconnect_probe_operation": {"type": "string", "enum": ["inspect"]}
+            "disconnect_probe_operation": {"type": "string", "enum": ["inspect"]},
+            "inspection_interval_seconds": {"type": "integer", "minimum": 1},
+            "max_inspections_per_cycle": {"type": "integer", "minimum": 1},
+            "model_free_tick": {"type": "string", "minLength": 1}
           }
         },
         "evidence": {
@@ -156,6 +162,24 @@
           "type": "array",
           "uniqueItems": true,
           "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+        },
+        "fixed_inputs": {
+          "type": "object"
+        },
+        "call_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_calls_per_run", "max_timeout_ms", "allowed_sources"],
+          "properties": {
+            "max_calls_per_run": {"type": "integer", "minimum": 1},
+            "max_timeout_ms": {"type": "integer", "minimum": 1},
+            "allowed_sources": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "enum": ["coordinator", "heartbeat"]}
+            }
+          }
         },
         "result_paths": {
           "type": "object",

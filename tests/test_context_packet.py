@@ -7,6 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_validate_pm_dispatch import (
+    base_task,
+    codex_dispatch,
+    codex_run,
+    split_runtime,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER_PATH = ROOT / "scripts" / "build_context_packet.py"
@@ -202,6 +209,29 @@ class ContextPacketCase(unittest.TestCase):
             self.assertEqual(first["objective"], "生成紧凑的 Worker 上下文")
             self.assertEqual(first["confirmed_facts"][0]["status"], "pass")
 
+    def test_packet_carries_thin_wrapper_delegation_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_path, _ = self.create_sources(root)
+            task = json.loads(task_path.read_text(encoding="utf-8"))
+            task["dispatch"]["delegation"] = {
+                "mode": "thin-wrapper-subagent",
+                "agent": "gemini-flash-medium",
+                "initial_invocation_limit": 1,
+                "repair_invocation_limit": 1,
+                "retry_policy": "focused-verification-failure-only",
+            }
+            task_path.write_text(
+                json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            output = root / "context" / "active-context.json"
+            packet, _ = self.builder.build_context_packet(
+                task_path, output, generated_at=NOW
+            )
+            self.assertEqual(
+                packet["execution"]["delegation"], task["dispatch"]["delegation"]
+            )
+
     def test_validator_rejects_source_drift_and_unapproved_full_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -255,6 +285,70 @@ class ContextPacketCase(unittest.TestCase):
                 check_sources=True,
             )
             self.assertEqual(errors, [])
+
+    def test_runtime_lease_churn_and_output_path_do_not_change_packet_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = base_task("SPEC-101")
+            task.update({"status": "IN_IMPL", "type": "spec"})
+            task["lifecycle"]["phase"] = "implementation"
+            task["dispatch"] = codex_dispatch()
+            task["runs"] = [codex_run()]
+            task, runtime = split_runtime(task)
+            task_path = root / "task.json"
+            runtime_path = root / "runtime.yaml"
+            task_path.write_text(json.dumps(task), encoding="utf-8")
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+
+            first, _ = self.builder.build_context_packet(
+                task_path, root / "first" / "active-context.json", generated_at=NOW
+            )
+            lease = runtime["runs"][0]["attempts"][0]["lease"]
+            lease["heartbeat_at"] = "2026-08-27T00:10:00Z"
+            lease["expires_at"] = "2026-08-27T01:10:00Z"
+            lease["renew_count"] = 1
+            lease["event_cursor"] = "cursor-2"
+            runtime["runs"][0]["event_cursor"] = "cursor-2"
+            runtime["last_updated"] = "2026-08-27T00:10:00Z"
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+            second, _ = self.builder.build_context_packet(
+                task_path,
+                root / "second" / "active-context.json",
+                generated_at="2026-08-27T00:10:00Z",
+            )
+            self.assertEqual(first["packet_sha256"], second["packet_sha256"])
+            self.assertEqual(
+                second["source_digests"]["runtime"]["digest_kind"],
+                "runtime-context-v1",
+            )
+
+            lease["last_progress_summary"] = "core edit complete"
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+            drift = self.builder.validate_context_packet(
+                second,
+                packet_path=root / "second" / "active-context.json",
+                schema=self.schema,
+                check_sources=True,
+            )
+            self.assertTrue(any("runtime source digest drift" in item for item in drift))
+
+    def test_project_snapshot_source_identity_ignores_absolute_root(self) -> None:
+        snapshot = {
+            "schema_version": "1",
+            "root": "/workspace/one",
+            "generated_at": NOW,
+            "snapshot_sha256": "sha256:" + "0" * 64,
+            "git": {"head": "abc", "status_sha256": "sha256:" + "1" * 64},
+            "focus": [],
+        }
+        relocated = dict(snapshot, root="/workspace/two")
+        first = self.builder.source_sha256(
+            Path("unused"), self.builder.PROJECT_SNAPSHOT_V1, snapshot
+        )
+        second = self.builder.source_sha256(
+            Path("unused"), self.builder.PROJECT_SNAPSHOT_V1, relocated
+        )
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

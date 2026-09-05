@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,17 +15,22 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from build_context_packet import build_context_packet  # noqa: E402
+from build_context_packet import build_context_packet, select_run  # noqa: E402
 from build_evidence_digest import build_evidence_digest  # noqa: E402
 from build_project_snapshot import build_project_snapshot  # noqa: E402
+from check_coordinator_budget import build_report, find_session  # noqa: E402
 from manage_recovery_ledger import (  # noqa: E402
     default_path,
-    initial_ledger,
-    validate_ledger,
+    ensure_ledger,
+    execution_error,
 )
 from validate_pm_dispatch import (  # noqa: E402
     assert_supported_schema,
+    compose_task_runtime,
     load_structured_file,
+    runtime_file_for,
+    parse_time,
+    validate_codex_heartbeat_automation,
     validate_schema,
 )
 
@@ -40,6 +46,75 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
+def assert_heartbeat_dispatch_ready(
+    task_path: Path,
+    task: dict,
+    automation_dir: Path | None,
+    now: datetime | None = None,
+) -> str | None:
+    dispatch = task.get("dispatch") or {}
+    if dispatch.get("strategy") == "direct" or not dispatch.get("worker_required"):
+        return None
+    effective = task
+    if task.get("schema_version") == "4":
+        runtime_path = runtime_file_for(task_path, task, None)
+        if runtime_path is None or not runtime_path.exists():
+            raise ValueError("Worker dispatch requires a Runtime sidecar")
+        runtime = load_structured_file(runtime_path)
+        effective = compose_task_runtime(task, runtime)
+        dispatch = effective.get("dispatch") or {}
+    resolution = dispatch.get("resolution") or {}
+    if resolution.get("provider") != "codex" or not dispatch.get("heartbeat_required"):
+        return None
+    if resolution.get("monitor_mode") != "heartbeat":
+        raise ValueError("Codex worker dispatch requires monitor_mode=heartbeat")
+    heartbeat = dispatch.get("heartbeat")
+    if not isinstance(heartbeat, dict) or heartbeat.get("status") != "active":
+        raise ValueError("Codex worker dispatch requires an active coordinator Heartbeat before create")
+    for field in ("automation_id", "coordinator_thread_id", "target_run_id"):
+        if not heartbeat.get(field):
+            raise ValueError(f"Codex worker dispatch Heartbeat requires {field}")
+    if int(str(resolution.get("adapter_version") or "0")) >= 13 and not isinstance(
+        heartbeat.get("coordinator_epoch"), int
+    ):
+        raise ValueError("Codex v13 Heartbeat requires coordinator_epoch")
+    target_run = next(
+        (
+            run
+            for run in effective.get("runs", [])
+            if run.get("run_id") == heartbeat.get("target_run_id")
+        ),
+        None,
+    )
+    if not isinstance(target_run, dict):
+        raise ValueError("Codex worker dispatch Heartbeat target Run is missing")
+    if not target_run.get("worker_id"):
+        provisioning = target_run.get("provisioning")
+        if target_run.get("status") != "provisioning" or not isinstance(
+            provisioning, dict
+        ):
+            raise ValueError(
+                "Worker creation without worker_id requires a provisioning Run"
+            )
+        if provisioning.get("status") != "pending":
+            raise ValueError("Worker creation requires pending provisioning")
+        if parse_time(provisioning.get("deadline_at")) <= (
+            now or datetime.now(timezone.utc)
+        ):
+            raise ValueError("Worker provisioning deadline expired; roll it back")
+    if automation_dir is not None:
+        errors: list[str] = []
+        validate_codex_heartbeat_automation(
+            heartbeat,
+            automation_dir.resolve(),
+            errors,
+            str(task_path),
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
+    return str(heartbeat["automation_id"])
+
+
 def run_preflight(
     task_path: Path,
     *,
@@ -51,6 +126,12 @@ def run_preflight(
     max_chars: int,
     max_files: int,
     generated_at: str | None,
+    automation_dir: Path | None = None,
+    coordinator_session_dir: Path | None = None,
+    mode: str | None = None,
+    objective: str | None = None,
+    purpose: str = "execute",
+    recovery_attempt: str | None = None,
 ) -> dict[str, str | None]:
     task_path = task_path.resolve()
     project_root = project_root.resolve()
@@ -59,6 +140,77 @@ def run_preflight(
     stamp = now_iso(generated_at)
     evidence_path = task_path.parent / "evidence.yaml"
     task = load_structured_file(task_path)
+    runtime_path = runtime_file_for(task_path, task, None)
+    runtime = load_structured_file(runtime_path) if runtime_path and runtime_path.exists() else None
+    effective = compose_task_runtime(task, runtime)
+    run = select_run(effective.get("runs", []))
+    effective_mode = mode or ("continuation" if run and run.get("worker_id") else "initial")
+    schema_dir = SCRIPT_DIR.parent / "references" / "schemas"
+    ledger_path = default_path(task_path)
+    if purpose == "execute" and effective_mode == "continuation" and run and run.get("worker_id") and not ledger_path.is_file():
+        raise ValueError("continuation is missing its canonical Recovery Ledger; reconcile/import legacy history first")
+    legacy_path = output_dir / "recovery-ledger.json"
+    if purpose == "execute" and legacy_path != ledger_path and legacy_path.is_file() and not ledger_path.exists():
+        if load_structured_file(legacy_path).get("gates"):
+            raise ValueError("legacy recovery history exists in the output directory; import it before preflight")
+    if purpose == "execute":
+        ensure_ledger(task_path, task["id"], stamp, schema_dir)
+    ledger = load_structured_file(ledger_path) if ledger_path.is_file() else None
+    if purpose == "execute":
+        error = execution_error(ledger, gate or (run or {}).get("gate") or task.get("lifecycle", {}).get("phase"), recovery_attempt)
+        if error:
+            raise ValueError(error)
+    heartbeat_id = assert_heartbeat_dispatch_ready(
+        task_path, task, automation_dir, parse_time(stamp)
+    ) if purpose == "execute" else None
+    coordinator_report = None
+    if heartbeat_id:
+        runtime_path = runtime_file_for(task_path, task, None)
+        runtime = load_structured_file(runtime_path) if runtime_path else {}
+        heartbeat = runtime.get("heartbeat") or {}
+        coordinator_thread_id = str(heartbeat.get("coordinator_thread_id") or "")
+        session_path = (
+            find_session(coordinator_session_dir, coordinator_thread_id)
+            if coordinator_session_dir is not None
+            else None
+        )
+        coordinator_report = build_report(
+            session_path,
+            thread_id=coordinator_thread_id,
+            epoch=int(heartbeat.get("coordinator_epoch") or 1),
+            measured_at=stamp,
+        )
+        coordinator_schema = load_structured_file(
+            SCRIPT_DIR.parent
+            / "references"
+            / "schemas"
+            / "coordinator-budget.schema.json"
+        )
+        coordinator_errors = validate_schema(
+            coordinator_report,
+            coordinator_schema,
+            "coordinator-budget.json",
+            coordinator_schema,
+        )
+        if coordinator_errors:
+            raise ValueError("invalid Coordinator Budget:\n" + "\n".join(coordinator_errors))
+        target_run = next(
+            (
+                run
+                for run in runtime.get("runs", [])
+                if run.get("run_id") == heartbeat.get("target_run_id")
+            ),
+            {},
+        )
+        if (
+            not target_run.get("worker_id")
+            and coordinator_report["action"] == "handoff-required"
+        ):
+            raise ValueError(
+                "Coordinator context budget requires a new epoch before Worker creation: "
+                + "; ".join(coordinator_report["reasons"])
+            )
+        write_json(output_dir / "coordinator-budget.json", coordinator_report)
     configured_evidence = task.get("verification", {}).get("evidence_file")
     if configured_evidence:
         candidate = Path(str(configured_evidence))
@@ -88,22 +240,14 @@ def run_preflight(
     if len(snapshot_text) > max_chars:
         raise ValueError(f"Project Snapshot exceeds {max_chars} chars")
 
-    ledger_path = output_dir / "recovery-ledger.json"
-    if ledger_path.exists():
-        ledger = load_structured_file(ledger_path)
-    else:
-        ledger = initial_ledger(task["id"], stamp)
-        write_json(ledger_path, ledger)
-    schema_dir = SCRIPT_DIR.parent / "references" / "schemas"
-    ledger_errors = validate_ledger(ledger, ledger_path, schema_dir)
-    if ledger_errors:
-        raise ValueError("invalid Recovery Ledger:\n" + "\n".join(ledger_errors))
-
     packet_path = output_dir / "active-context.json"
     packet, packet_text = build_context_packet(
         task_path,
         packet_path,
-        mode="initial",
+        mode=effective_mode,
+        objective=objective,
+        purpose=purpose,
+        recovery_attempt=recovery_attempt,
         gate=gate,
         verification_commands=verification_commands,
         packet_max_chars=max_chars,
@@ -118,9 +262,15 @@ def run_preflight(
 
     return {
         "task_id": str(task["id"]),
+        "mode": effective_mode,
+        "recovery_ledger": str(ledger_path) if ledger_path.is_file() else None,
         "evidence_digest": digest_result,
         "project_snapshot": snapshot["snapshot_sha256"],
         "context_packet": packet["packet_sha256"],
+        "heartbeat": heartbeat_id,
+        "coordinator_budget": (
+            coordinator_report["action"] if coordinator_report else None
+        ),
         "output_dir": str(output_dir),
     }
 
@@ -130,12 +280,24 @@ def main() -> int:
     parser.add_argument("task")
     parser.add_argument("--project-root")
     parser.add_argument("--output-dir")
+    parser.add_argument("--mode", choices=["initial", "continuation"], help="Defaults to continuation when reusing a Worker")
+    parser.add_argument("--objective", help="Remaining work only for a continuation")
+    parser.add_argument("--purpose", choices=["execute", "inspect"], default="execute")
+    parser.add_argument("--recovery-attempt", help="Pending recovery attempt_key reserved before retrying")
     parser.add_argument("--gate", choices=["contract", "implementation", "integration", "verification", "closure"])
     parser.add_argument("--focus", action="append", default=[])
     parser.add_argument("--verification-command", action="append", default=[])
     parser.add_argument("--max-chars", type=int, default=6000)
     parser.add_argument("--max-files", type=int, default=5000)
     parser.add_argument("--now")
+    parser.add_argument(
+        "--automation-dir",
+        help="Codex automations directory; defaults to $CODEX_HOME/automations",
+    )
+    parser.add_argument(
+        "--coordinator-session-dir",
+        help="Codex session directory; defaults to $CODEX_HOME/sessions",
+    )
     args = parser.parse_args()
     task_path = Path(args.task).resolve()
     project_root = (
@@ -148,6 +310,18 @@ def main() -> int:
         if args.output_dir
         else Path("/tmp/pm-dispatch") / task_path.parent.name
     )
+    automation_dir = (
+        Path(args.automation_dir).resolve()
+        if args.automation_dir
+        else Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).resolve()
+        / "automations"
+    )
+    coordinator_session_dir = (
+        Path(args.coordinator_session_dir).resolve()
+        if args.coordinator_session_dir
+        else Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).resolve()
+        / "sessions"
+    )
     result = run_preflight(
         task_path,
         project_root=project_root,
@@ -158,6 +332,12 @@ def main() -> int:
         max_chars=args.max_chars,
         max_files=args.max_files,
         generated_at=args.now,
+        automation_dir=automation_dir,
+        coordinator_session_dir=coordinator_session_dir,
+        mode=args.mode,
+        objective=args.objective,
+        purpose=args.purpose,
+        recovery_attempt=args.recovery_attempt,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

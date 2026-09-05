@@ -15,12 +15,12 @@
 Use a stable machine ID and a derived human-readable label.
 
 ```text
-task_id:      BUG-041
-display_name: BUG-041 P1 AA 最近诊断记录
-worker_name:  BUG-041-impl-w01
-worker_label: BUG-041 P1 AA 最近诊断记录 [impl w01]
-run_id:       run-BUG-041-impl-w01
-attempt_id:   attempt-BUG-041-impl-w01-a01
+task_id:      BUG-001
+display_name: BUG-001 P1 API Fix pagination
+worker_name:  BUG-001-impl-w01
+worker_label: BUG-001 P1 API Fix pagination [impl w01]
+run_id:       run-BUG-001-impl-w01
+attempt_id:   attempt-BUG-001-impl-w01-a01
 ```
 
 Task IDs use `<TYPE>-<three digits>`. Supported types are `BUG`, `SPEC`, `ONBOARD`, `RELEASE`, `ENV`, and `CHORE`. The ID prefix must match `task.yaml.type`.
@@ -52,6 +52,12 @@ Keep lifecycle, verification, blocker, and closure as separate tracks, but valid
 
 ## Dispatch And Runtime Invariants
 
+- The conversation in which PM Dispatch was invoked is the sole coordinator. Before launching Worker work, use `automation_update` with `kind=heartbeat` to bind or update active monitoring on that conversation; `targetThreadId`/`target_thread_id` equals its `coordinator_thread_id`. `dispatch_preflight.py` rejects Worker creation until this invariant holds.
+- A Codex Worker dispatch uses `create_thread` to create a separate user-visible task for the dispatched SPEC/BUG. The coordinator conversation performs orchestration, monitoring, and closure, not the dispatched implementation. `direct` creates neither; `batch-worker` creates one visible Worker per Batch.
+- A Worker thread never owns the Heartbeat, and no second monitor thread/task is created. The Heartbeat in the current coordinator conversation observes the Worker thread recorded by the target Run.
+- `dispatch.delegation` is an optional stable execution contract. `thin-wrapper-subagent` keeps `strategy=single-worker`: the managed Codex thread remains the sole visible Worker while one external sub-agent performs the bounded implementation inside that Worker's checkout. The coordinator never invokes the sub-agent directly.
+- Delegated execution requires a pinned Codex Provider, `max_parallel_workers=1`, coordinator Heartbeat, and the visible wrapper capabilities `background-worker`, `code-edit`, `git`, `heartbeat`, and `shell`. The initial sub-agent limit is one; one differential repair is allowed only after focused verification produces failing evidence, and it stays in the same Worker/Attempt.
+- The external sub-agent does not own PM state, Worker monitoring, Git commit, or closure. The visible Worker validates the Packet, invokes from its own working directory, inspects only the resulting diff, runs focused verification, commits, and sends terminal delegation.
 - `direct` uses local provider policy and has no runs, reasoning profile, resolution, heartbeat, lease, or resource lock.
 - Worker strategies require `worker_required: true`, `reasoning_profile`, `fallback_policy`, `resolution`, and a positive `max_parallel_workers`.
 - `reasoning_profile` contains only portable effort intent: `fast`, `standard`, `deep`, or `critical`.
@@ -66,21 +72,25 @@ Keep lifecycle, verification, blocker, and closure as separate tracks, but valid
 - Every active Run copies actual Provider, model, and reasoning fields from the current `resolution`; terminal historical Runs preserve the Provider, model, and reasoning values that actually executed them. Request fields never masquerade as runtime facts.
 - `IN_IMPL` and `IN_INTEGRATION` worker tasks require at least one Run.
 - Every Run has one or more Attempts; Attempt IDs are unique within the Run.
-- An active Run has exactly one active Attempt, a real `worker_id`, and an unexpired Lease.
+- `provisioning` is the only active state without `worker_id` or Lease. It has one provisioning Attempt, a pending transaction, and a deadline no more than five minutes after start. An executing `queued`/`running` Run has exactly one active Attempt, a real `worker_id`, and an unexpired Lease.
 - Lease `holder` equals `run_id`; acquisition precedes expiry.
 - Terminal Runs cannot contain active Attempts.
 - Active Run count cannot exceed `max_parallel_workers`.
-- `heartbeat_required` means periodic background monitoring is required. The Codex Resolver prefers `heartbeat`; the dispatch coordinator performs one incremental check every 10 minutes.
-- An incremental check reads only Worker status, Lease metadata, and the latest persisted milestone (`progress_seq`, time, summary, optional event cursor). An unchanged live Worker renews the same Attempt without loading Task, Evidence, dependencies, locks, Gate history, or the full transcript.
+- `heartbeat_required` means periodic background monitoring is required. The Codex Resolver prefers `heartbeat`; Codex Adapter v13 plans one incremental check every 10 minutes.
+- An incremental check reads only Worker status, Lease metadata, and the latest persisted milestone (`progress_seq`, time, summary, optional event cursor). Reconcile once with `reconcile_worker_liveness.py --write`; unchanged live work renews the same Attempt without full Task/Evidence/history reads. After 30 minutes without progress, persist one `diagnosis-required` observation, then return `awaiting-diagnosis` until real progress. A verified running command may defer diagnosis until its fixed deadline.
 - A full reconciliation is triggered only by a new milestone, terminal state, safety-boundary change, or protected design-freeze change. It then reads the relevant Task/Evidence and runtime facts needed to update the Gate and single next action.
-- Incremental monitoring uses `scan_scope: incremental`, `lightweight: true`, the fixed three-item `read_set`, `context_policy: coordinator`, and `interval_minutes: 10`. It runs in the dispatch coordinator task and never creates a second monitor Worker or task.
-- `event-lease` combines push milestones, Provider-native terminal waiting, and a Lease-expiry watchdog. The wait blocks until terminal activity or the current Lease deadline; it does not read Worker history.
-- On a terminal event, collect terminal delegation. On a wait timeout, invoke the Adapter `inspect` operation once and read only Worker status plus Lease metadata. A live Worker renews the same Attempt and re-arms the wait.
+- Incremental monitoring uses `scan_scope: incremental`, `lightweight: true`, the fixed read set, `context_policy: coordinator`, and `interval_minutes: 10`. `plan_monitor_tick.py` is the model-free decision core. `sleep` performs no Provider call; `inspect` requires a unique `status-inspect-authorized` event, one call per cycle, and 600-second scheduled debounce. It never loops or runs in a second monitor task.
+- `event-lease` combines push milestones, one bounded Provider-native terminal wait, and a Lease-expiry watchdog. Codex Adapter v12 gives each active Run `wait_budget: {policy: single-short, max_calls: 1, max_timeout_ms: 30000}`. The budget is never reset by a later coordinator turn.
+- Dispatch order is fixed: activate the coordinator Heartbeat, begin a 120-second provisioning transaction, pass Preflight, create the Worker, complete the transaction with Worker ID/Lease, authorize one post-create snapshot, then optionally perform one wait of at most 30 seconds. Create failure first stops Heartbeat and then rolls back the transaction and locks. A timeout never re-arms the wait.
+- Before the native positive wait, `authorize_terminal_wait.py` atomically appends `terminal-wait-authorized`; a second authorization, a timeout above 30 seconds, or a Heartbeat source fails. Append `terminal-wait-finished` after the call. Runtime validation checks the budget and event order; optional Codex session audit reports positive native `wait_threads` calls without matching authorization.
+- Before every native zero-wait snapshot, `authorize_status_inspect.py` atomically consumes its cycle ID. Scheduled checks less than 600 seconds apart fail. Optional Codex session audit reports native zero-wait calls without matching authorization.
+- Preflight writes `coordinator-budget.json`. At 96K last-input tokens it warns; at 160K or 150 model steps it requires a new Coordinator epoch before creating another Worker. Missing Provider usage is `unknown`, not fabricated; active Worker monitoring and closure remain permitted.
 - Monitor/network/app unavailability sets `liveness_state: unknown` and `monitor_gap_started_at` without releasing the Attempt, Lease ownership, or locks. After connectivity returns, inspect the original Worker first. Only a Provider-confirmed irrecoverable identity followed by one grace probe crosses the ownership boundary: expire that Attempt, release its locks, preserve its last Artifact/cursor, then recover. A missed check or expired timestamp alone is neither Blocked nor permission to duplicate-dispatch.
 - Persist each milestone in the Lease as monotonic `progress_seq`, `last_progress_at`, `last_progress_summary`, and optional Provider `event_cursor`. Status-only renewal updates `heartbeat_at` but does not invent progress.
+- Idle/interrupted Provider states reconcile to a queued Run/Attempt with an attention observation, preserving identity/ownership. They do not prove successful delegation or that subprocesses stopped. Check the latest turn, pending process, and Evidence before resuming the remaining work or collecting a terminal outcome. Terminal reconciliation is idempotent; a matching `terminal-collected` event makes the planner stop. The Coordinator must still stop the actual Automation and persist Heartbeat status.
 - Milestone Workers notify after root-cause/implementation decision, core edit, focused verification, irreversible boundary, and terminal state. Running messages are 1-2 sentences. Terminal delegation reports status, Run/Attempt, commit/files, verification Artifact IDs, hard blocker/user action, and next action.
 - Event/ milestone monitoring has no periodic full Task, Evidence, or history inspection and requires no `dispatch.heartbeat` metadata.
-- A Codex Heartbeat runs in the dispatch coordinator thread. Its Automation target equals `coordinator_thread_id`, differs from every Worker ID, and monitors the declared `target_run_id`; `monitor_thread_id` is invalid.
+- A Codex Heartbeat runs in the current conversation where PM Dispatch was invoked. Its Automation target equals that conversation's `coordinator_thread_id`, differs from every Worker ID, and monitors the declared `target_run_id`; `monitor_thread_id` is invalid.
 - The Heartbeat prompt requires the fixed incremental read set and immediate triggered reconciliation. The Task budget cannot exceed 240 characters; referenced Task/Evidence remain machine facts and are not loaded on unchanged checks.
 - An active Run monitored by Heartbeat requires `heartbeat.status=active`; no active Run permits only `paused` or `stopped`.
 - Every active incremental Heartbeat interval is exactly 10 minutes. Blocked work without an active Run pauses monitoring; an explicitly active recovery Run keeps the same 10-minute check.
@@ -89,30 +99,30 @@ Keep lifecycle, verification, blocker, and closure as separate tracks, but valid
 
 ## Lean Context Contract
 
-`Context Packet v1` 是 Task、Runtime 和 Evidence 的确定性派生缓存，不是新的事实源。分发前由 `build_context_packet.py` 生成，必须包含来源路径与 SHA-256、当前 Run/Attempt/Gate、设计指纹、目标、范围、已确认事实、当前失败/Blocker、依赖、活动锁、证据缺口和字符预算。`packet_sha256` 排除 `generated_at`，因此来源和语义不变时重复生成保持稳定。
+`Context Packet v1` is a deterministic derived cache, not an authoritative record. Each source declares `digest_kind`: Task/Evidence/ledger use file hashes, Runtime uses a semantic projection, and derived summaries use normalized identities. Packet identity excludes generation time, source placement, Lease expiry, and Provider cursor. Project-snapshot source identity also excludes its absolute root. Lease renewal or relocation does not create a new semantic Packet; milestone, state, design, or evidence changes still invalidate it.
 
-Phase 3-6 增加三个派生输入：`current-evidence.json` 是 Evidence v2 的当前状态摘要，`project-snapshot.json` 是 Git/文件结构/焦点文件的确定性快照，`recovery-ledger.json` 是按 Gate 和失败指纹记录恢复路径的审计账本。三者都带源校验或结构校验，不替代 Task、Runtime、Evidence 事实源；默认输出到项目外临时目录。`dispatch_preflight.py` 串联生成和校验，失败时不允许进入 Worker 创建。
+Before dispatch, derive `current-evidence.json` (current Evidence state) and `project-snapshot.json` (Git/files/focused sources). `dispatch_preflight.py` may place these caches outside the project, but recovery history is always `<task-dir>/context/recovery-ledger.json`. New output directories never reset it. Legacy temporary ledgers require explicit import/reconciliation; never overwrite a nonempty canonical ledger. Validate source and structural integrity before execution.
 
-恢复熔断按 Gate 和失败指纹计数：同一方法失败两次后必须改变恢复方法；三条不同路径均失败则开路并要求契约/设计修复与显式 reset。普通新一轮 Prompt 不是熔断重置理由。
+Recovery counts by Gate and failure fingerprint: `record` the initial failure, atomically `authorize` before a retry, and `record` its outcome using the reserved key. Change method after two same-method failures. Three failed paths open the breaker. Executable Packets and active-Run validation reject open breakers or unreserved recovery; `--purpose inspect` cannot authorize Worker prompts. Reset requires evidence of a changed Task design or recorded checkpoint, not a new prompt, method label, or reason wording. Preserve attempt/reset history; ordinary recovery never creates a Runtime Attempt.
 
-Worker 首轮默认只接收稳定执行前缀、Context Packet 路径/SHA、差量目标和确切源码路径；同一 Worker 续跑只发送新 Packet SHA、Gate 和差量。禁止默认注入完整 Task、Evidence、Runtime、dispatch-board 或历史 Prompt。以下触发器之一必须写入 Packet，才允许全文读取：`design-freeze-change`、`safety-boundary-change`、`contract-review`、`schema-migration`、`terminal-closure`、`forensic-diagnosis`。
+Initial Workers receive a stable execution prefix, Packet path/SHA, objective, and exact source paths. Reusing a Worker makes Preflight default to continuation: new Packet SHA, Gate, and delta only. Use an explicit remaining objective or `lifecycle.next_action`; an empty continuation objective fails instead of falling back to accepted scope. Do not inject full Task/Evidence/Runtime/boards/history by default. Full reads require one recorded trigger: `design-freeze-change`, `safety-boundary-change`, `contract-review`, `schema-migration`, `terminal-closure`, or `forensic-diagnosis`.
 
-默认预算为 Packet 8000 字符、首轮 Prompt 6000 字符、续跑 Prompt 3000 字符。复杂任务可将 Packet 提高到 16000 字符，但必须在生成命令中显式覆盖；不得用固定行数替代字符预算。生成与校验命令：
+The Packet builder defaults to 8,000 characters; initial prompts to 6,000 and continuation prompts to 3,000. Complex Packets can explicitly increase to 16,000. Preflight uses a stricter shared 6,000-character default for its bundle artifacts. Character budgets are not token counts or fixed line limits. Example commands:
 
 ```bash
-python3 scripts/build_context_packet.py docs/tasks/SPEC-042/task.yaml \
+python3 scripts/build_context_packet.py docs/tasks/SPEC-002/task.yaml \
   --gate implementation --verification-command "python3 -m unittest"
 python3 scripts/validate_context_packet.py \
-  docs/tasks/SPEC-042/context/active-context.json \
-  --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
+  docs/tasks/SPEC-002/context/active-context.json \
+  --prompt docs/tasks/SPEC-002/prompts/01-implementation.md
 
-python3 scripts/dispatch_preflight.py docs/tasks/SPEC-042/task.yaml \
+python3 scripts/dispatch_preflight.py docs/tasks/SPEC-002/task.yaml \
   --project-root . --gate implementation \
   --focus frontend/app/page.tsx \
   --verification-command "python3 -m unittest"
 ```
 
-来源 SHA 漂移、Packet 自身摘要漂移、超预算或未经授权的全文读取都必须在 Worker 创建前 fail closed。Context Packet 只保留当前 Gate 所需引用；详细命令、日志、SQL、DOM 和历史仍留在对应 Artifact。
+Semantic source drift, Packet hash mismatch, exceeded budgets, and unauthorized full reads stop Worker creation. Detailed commands, logs, SQL, DOM, and history stay in referenced Artifacts.
 
 ## Dependencies And Locks
 
@@ -122,16 +132,16 @@ Every active resource lock:
 
 - has an expiry;
 - points to an active Run in the same task;
-- does not outlive that Run's Lease;
+- does not outlive an executing Run's Lease or a provisioning Run's deadline;
 - obeys shared/exclusive conflict rules across the board.
 
 Run global validation before parallel dispatch:
 
 ```bash
 python3 scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
-python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml --automation-dir ~/.codex/automations
-python3 scripts/reconcile_worker_liveness.py docs/tasks/BUG-041/task.yaml \
-  --run-id run-BUG-041-impl-w01 --probe-status running --write
+python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-001/task.yaml --automation-dir ~/.codex/automations
+python3 scripts/reconcile_worker_liveness.py docs/tasks/BUG-001/task.yaml \
+  --run-id run-BUG-001-impl-w01 --probe-status running --write
 ```
 
 ## Autonomy And Blockers
@@ -150,7 +160,7 @@ Browser, API, SQL, screenshot, log, ID, upgrade, and release artifacts require:
 artifact_id: browser-001
 kind: browser
 source: codex-browser
-subject: existing user opens recent diagnostics
+subject: existing user opens pagination controls
 result: pass
 captured_at: 2026-07-13T12:00:00Z
 evidence_ref: evidence/browser-001.json
@@ -160,14 +170,14 @@ Artifacts may record `pass`, `fail`, or `info`. Failed and informational artifac
 
 ## Adapter Protocol
 
-Adapter protocol v2 declares `create`, `send`, `inspect`, `wait`, `rebind`, `collect`, and `cancel`. Operations define target inputs, result paths, timeout, and idempotency; results normalize Provider status and may persist a continuation token, event cursor, or terminal delegation. Adapter schema v3 permits Provider-specific model routing, but the Codex Adapter omits `model` so child Workers use the dispatching host's configured default model.
+Adapter protocol v2 declares `create`, `send`, `inspect`, `wait`, `rebind`, `collect`, and `cancel`. Operations define caller inputs, immutable fixed inputs, result paths, timeout, and idempotency; results normalize Provider status and may persist a continuation token, event cursor, or terminal delegation. Adapter schema v3 permits Provider-specific model routing, but the Codex Adapter omits `model` so child Workers use the dispatching host's configured default model.
 
 Build an invocation envelope and decode the provider result through:
 
 ```bash
 python3 scripts/adapter_protocol.py references/adapters/external-cli.adapter.json create \
-  --idempotency-key create-SPEC-042-a01 \
-  --inputs '{"title":"SPEC-042 页面","prompt":"implement and verify","reasoning_effort":"deliberate"}'
+  --idempotency-key create-SPEC-002-a01 \
+  --inputs '{"title":"SPEC-002 Settings page","prompt":"implement and verify","reasoning_effort":"deliberate"}'
 ```
 
 Task v4 keeps stable intent in `task.yaml`; Resolution, Heartbeat, locks, Run/Attempt/Lease, continuation state, and event cursors live in Runtime v1. Runtime events are append-only JSONL. Legacy embedded Task v3 remains readable, while migration validates Task v4, Runtime v1, and Evidence v2 before writing and preserves the original Task backup.
@@ -180,8 +190,8 @@ The validator supports the JSON Schema keywords used by the bundled schemas and 
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 scripts/resolve_pm_dispatch.py docs/tasks/BUG-041/task.yaml --write
-python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml
+python3 scripts/resolve_pm_dispatch.py docs/tasks/BUG-001/task.yaml --write
+python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-001/task.yaml
 ```
 
 The machine sources of truth are:

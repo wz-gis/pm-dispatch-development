@@ -1,168 +1,131 @@
 # PM Dispatch Development
 
-面向软件交付的 PM 调度 Skill：用结构化 Task、Evidence、Run/Attempt/Lease、依赖图和资源锁管理单工程、多工程联调和新工程接入。
+English | [简体中文](README.zh-CN.md) | [Measurement Notes](references/usage-evidence.md)
 
-## 核心变化
+A delivery-management skill for coding agents: turn bug fixes and feature requests into recoverable work with a compact task board, reusable Workers, and evidence-based acceptance. PM means project manager: the coordinating agent in the current conversation.
 
-- 任务机器 ID 使用 `BUG-041`、`SPEC-042`。
-- 人类可见名称使用 `BUG-041 P1 AA 最近诊断记录`。
-- Worker 使用唯一机器名和可见标签，例如 `BUG-041-impl-w01` 与 `BUG-041 P1 AA 最近诊断记录 [impl w01]`。
-- `CLOSED`、`PARTIAL_VERIFIED`、Blocked 和 verified-like 状态必须有 Evidence。
-- Browser/API/SQL 等证据使用结构化 Artifact，不接受任意字符串占位。
-- 分发任务线程每 10 分钟只增量检查 Worker 状态、Lease 和最新里程碑；触发里程碑或终态才读取相关完整事实，不创建第二个监控任务。
-- 监控或网络中断将存活状态标为 unknown 并保留 Attempt、Lease 所有权和锁；恢复后先 reconcile 原 Worker。
-- 普通可恢复问题留在同一 Worker/Attempt；只有安全边界或冻结设计变化才新建 Attempt。
-- Validator 检查状态矩阵、硬 Blocker、并发上限、Run/Attempt/Lease、依赖环和资源锁。
-- 精简质量检查契约让 Gate Policy 自动校验测试、静态分析、安全检查和 Review Evidence，不增加 Lifecycle 状态。
-- 核心协议平台无关；Resolver 根据能力和通用思考强度选择 Adapter，Codex 子 Worker 跟随发布端的默认模型配置。
-- Adapter protocol v2 将续接、等待、恢复、终态收集、幂等和状态映射变成机器契约。
-- Task v4 保存稳定契约，Runtime v1 保存运行态和事件游标，Evidence 使用 Schema v2；嵌入式 Task v3 可迁移。
+Best suited to ongoing work across sessions or repositories. Small, low-risk fixes can stay in the current conversation without a Worker. This is a Skill plus local Python tooling, not a hosted service or an MCP runtime proxy.
 
-## 安装
+## Measured, Not Promised
 
-把目录放到：
+One anonymized project snapshot, measured on **2026-09-04**:
+
+| Observation | Result | Meaning |
+| --- | ---: | --- |
+| Canonical task records | **48** | 37 bugs, 10 features, 1 release; excludes 2 template/alias documents |
+| Default actionable panel | **1,928 characters** | Compared with 9,472 for the all-task panel: **79.65% less text** |
+| Historical board vs actionable panel | **27,038 → 1,928 characters** | **92.87% less text** for current decisions, not equivalent-content compression |
+| Stored prompt files | **190** | Historical prompt documents, not 190 model calls |
+
+These are Unicode character counts from a mixed-version, single-project sample. They are **not measured token, cost, speed, or success-rate improvements**. Filtering removes closed/irrelevant details from the default view. See [scope, formulas, and reproduction](references/usage-evidence.md).
+
+## Frequent Workflows
+
+The examples below reflect recurring use patterns; the task-type distribution above is the only measured frequency.
+
+| When | Request after invoking the Skill | Result |
+| --- | --- | --- |
+| Daily triage | "Show actionable tasks and one next step each." | Five-column board; up to 8 rows by default |
+| Bug repair | "Dispatch BUG-001; keep monitoring in this conversation." | Visible Worker, frozen scope, focused checks, evidence report |
+| Feature delivery | "Dispatch SPEC-002 through implementation and browser acceptance." | One Worker reused across Gates; only new scope/evidence sent |
+| Interrupted work | "Reconcile the original Worker before replacing it." | Recover from Run/Attempt/Lease and persisted milestones |
+| Environment-blocked acceptance | "Separate completed code from missing live API or browser evidence." | Honest partial/blocked result and one unblock action |
+| Optional external implementation | "Gemini execute SPEC-002." | One visible Codex wrapper, one initial external-agent invocation |
+
+Release/migration and cross-repository work use the same records with broader verification and dependency/lock checks. Git commits, pushes, production changes, and visible task creation still require the user's requested scope and the host's permissions.
+
+## Quick Start
+
+Use the installation convention supported by your host. This repository's existing Codex setup uses:
 
 ```text
 ~/.codex/skills/pm-dispatch-development
 ```
 
-在 Codex 中调用：
-
 ```text
-使用 $pm-dispatch-development 处理这个需求，建立 Task、分发 Worker、回收 Evidence 并完成 Gate 收口。
+Use $pm-dispatch-development to triage this bug, choose the lightest strategy,
+and report verified progress and the next action.
 ```
 
-## 任务命名
+Local helpers require Python 3.11+; the lock-based helpers use POSIX `fcntl` (macOS/Linux). Native Windows is not validated. Core JSON and supported YAML-subset files need no third-party dependency; general YAML may require PyYAML.
+
+The visible Codex path also requires host task/Heartbeat tools. External implementation additionally requires an installed `sub-agents` Skill and a matching local agent definition. No external agent, credential, or model is bundled. See [delegated execution](references/delegated-subagent.md).
+
+## How It Works
 
 ```text
-task_id:      BUG-041
-display_name: BUG-041 P1 AA 最近诊断记录
-worker_name:  BUG-041-impl-w01
-worker_label: BUG-041 P1 AA 最近诊断记录 [impl w01]
-run_id:       run-BUG-041-impl-w01
-attempt_id:   attempt-BUG-041-impl-w01-a01
+Current PM conversation + Heartbeat
+  -> one visible Worker per dispatched task (reused across Gates)
+       -> optional one-shot external implementation
+  <- evidence, latest milestone, and one next action
 ```
 
-支持 `BUG`、`SPEC`、`ONBOARD`、`RELEASE`、`ENV`、`CHORE`。
-
-## 分发策略
-
-| 策略 | 用途 |
+| Term | Purpose |
 | --- | --- |
-| `direct` | 当前线程处理低风险小任务，不创建 Worker 运行态 |
-| `single-worker` | 一个任务级粘性 Worker 跨 Run/Gate 完成实现和验证 |
-| `batch-worker` | 2-4 个相似任务共享 Worker，结论保持独立 |
-| `full-dispatch` | 跨工程、数据库、发布、迁移和高风险真实链路 |
+| Worker | An execution agent/task that implements the assigned scope |
+| Task | Stable scope, dependencies, acceptance, and quality checks |
+| Runtime | Resolution, Worker IDs, ownership, events, and current execution |
+| Evidence | Structured artifacts supporting a result |
+| Run / Attempt | A unit of execution / its recoverable execution attempt |
+| Lease | Time-bounded ownership, not proof of progress |
+| Gate | A validation checkpoint that requires the declared evidence |
 
-## 思考强度适配
+Machine records are Task v4, Runtime v1, and Evidence v2. Keep lifecycle, verification, blockers, and closure separate. A passed build is not automatically end-to-end acceptance.
 
-核心层只使用四档 `reasoning_profile`，不允许 Task 直接指定模型。Codex Adapter 不传 `model`，子 Worker 跟随发布端的默认模型配置；档位只映射 Codex 思考强度。发布任务的临时模型覆盖不会被自动复制。
+Use `BUG-001 P1 API Fix pagination` for a display label: ID, priority, area, then title. Area names are project-defined. Examples here are fictional, not exported task titles. L0-L4 are this Skill's evidence levels, not industry certification; artifact requirements live in [the closure contract](references/closure.md).
 
-| 通用档位 | 模型来源 | Codex 思考强度 |
+## Bounded Overhead
+
+| Control | Default | What the number does not prove |
 | --- | --- | --- |
-| `fast` | 发布端默认 | 继承 |
-| `standard` | 发布端默认 | 继承 |
-| `deep` | 发布端默认 | `high` |
-| `critical` | 发布端默认 | `high` |
+| Scheduled inspections | 10 minutes, at most 6 scheduled checks/hour | Compared with 5 minutes, 50% fewer scheduled opportunities; ad hoc checks remain possible |
+| Positive terminal waits | 1 per Run, at most 30 seconds | Limits requested blocking time, not billed tokens or total transport latency |
+| Worker prompts | 6,000 initial / 3,000 continuation characters | 50% lower continuation cap, not measured cache savings |
+| Batch dispatch | 2-4 tasks per Worker | 50-75% fewer Worker creations than one per task, when batching is appropriate |
+| Recovery | 1 same-method retry, up to 2 alternatives | Bounded recovery, not guaranteed success |
 
-具体策略由 [codex.adapter.json](references/adapters/codex.adapter.json) 定义；其它平台仍可按自身能力声明模型路由。
+The 10-minute monitor stays in the dispatching conversation; no second monitor task is created. Its planner is deterministic and model-free, but **a host-scheduled Heartbeat may still consume model tokens**. The Skill cannot hide native MCP calls or keep a disconnected host running. Authorization and optional session audits detect violations; outages retain ownership until reconciliation.
 
-```bash
-python3 scripts/resolve_pm_dispatch.py docs/tasks/BUG-041/task.yaml --write
-```
+## Choose A Strategy
 
-## 自动 Gate
+- `direct`: a small, low-risk change in this conversation.
+- `single-worker`: implementation, integration, repair, and verification in one reusable Worker.
+- `batch-worker`: 2-4 related tasks sharing a project/Gate, with separate conclusions.
+- `full-dispatch`: high-risk or cross-project work with ordered dependencies and broader evidence.
 
-Validator 会检查：
+Codex child Workers use the dispatch host's default model; temporary parent-task model overrides are not automatically copied. `fast`/`standard` inherit effort; `deep`/`critical` map to `high`. Other hosts need an adapter that implements the declared operations: the bundled [external CLI adapter](references/adapters/generic.md) is a portability example, not a prebuilt Gemini/other-agent integration.
 
-- Task ID、类型、优先级、Area、标题与 `display_name` 一致。
-- Lifecycle、Verification、Blocker、Closure 状态矩阵一致。
-- 终态 Evidence 存在且 conclusion 匹配。
-- Artifact 结构、时间、结果和 L0-L4 引用有效。
-- 活跃 Run 有真实 Worker ID、唯一 Attempt 和有效 Lease。
-- 10 分钟同线程增量 Heartbeat、触发式全文收口、断网所有权保护、Worker 复用和并发上限有效。
-- Board 依赖存在且无环。
-- Active resource lock 绑定 Active Run，且不超过 Run Lease。
+## Inspect And Validate
+
+Run these from the Skill directory; replace the project placeholder with your own local path:
 
 ```bash
-python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml
-python3 scripts/validate_pm_dispatch.py docs/tasks/BUG-041/task.yaml --automation-dir ~/.codex/automations
-python3 scripts/validate_pm_dispatch.py --tasks-dir docs/tasks
-```
-
-## 自检
-
-```bash
-python3 -m unittest discover -s tests -v
+PROJECT=/path/to/project
+python3 scripts/render_task_panel.py --tasks-dir "$PROJECT/docs/tasks"
+python3 scripts/validate_pm_dispatch.py --tasks-dir "$PROJECT/docs/tasks"
+python3 scripts/measure_context_baseline.py --tasks-dir "$PROJECT/docs/tasks" \
+  --board "$PROJECT/docs/dispatch-board.md" --public \
+  --output /tmp/pm-public-baseline.json
+python3 -m unittest discover -s tests
 python3 scripts/validate_skill_consistency.py
-python3 -m py_compile scripts/*.py tests/*.py
-for file in references/schemas/*.json references/adapters/*.adapter.json; do python3 -m json.tool "$file" >/dev/null; done
 ```
 
-旧 Task/Evidence 先 dry-run 检查，再显式写回：
+The built-in panel renderer currently uses Chinese display labels; [the panel reference](references/task-panel.md) provides their English meanings. Agent explanations follow the user's language. Schema keys and status enums do not change with language.
 
-```bash
-python3 scripts/migrate_pm_dispatch.py docs/tasks
-python3 scripts/migrate_pm_dispatch.py docs/tasks --write
-```
+## Privacy And Limits
 
-写回前会验证 Task v4、Runtime v1 或 Evidence v2 输出；原 Task/Evidence 按源版本备份，Runtime 与空事件日志作为 sidecar 创建。默认面板只显示可行动项；其它视图按需读取：
+Only `measure_context_baseline.py --public` uses a numeric, fixed-label export allowlist. Normal panels, Task/Evidence, prompts, session logs, and snapshots can contain private text; they are **not automatically redacted**. Do not publish them or local backups. Ignore rules do not remove previously tracked files or Git history.
 
-```bash
-python3 scripts/render_task_panel.py --tasks-dir docs/tasks
-python3 scripts/render_task_panel.py --tasks-dir docs/tasks --view waiting-user
-python3 scripts/render_task_panel.py --tasks-dir docs/tasks --task SPEC-042
-python3 scripts/render_task_panel.py --tasks-dir docs/tasks --view all
-```
+No production project names, home-directory paths, task titles, Worker IDs, credentials, or raw sessions are included in the published measurement. Aggregation removes direct identifiers; it is not a formal anonymity guarantee.
 
-分发前生成并校验精益 Context Packet；确定性基线只记录字符、字节和行数，不伪造模型 Token：
+## Reference Map
 
-```bash
-python3 scripts/measure_context_baseline.py --tasks-dir docs/tasks \
-  --board docs/dispatch-board.md --output /tmp/pm-context-baseline.json
-python3 scripts/build_context_packet.py docs/tasks/SPEC-042/task.yaml \
-  --gate implementation --verification-command "python3 -m unittest"
-python3 scripts/validate_context_packet.py \
-  docs/tasks/SPEC-042/context/active-context.json \
-  --prompt docs/tasks/SPEC-042/prompts/01-implementation.md
-```
+- [SKILL.md](SKILL.md): concise agent instructions and on-demand routing.
+- [Core contract](references/core-contract.md): state, dependency, lock, and Gate invariants.
+- [Task examples](references/task-examples.md): fictional record fragments.
+- [Prompts](references/prompts.md): stable prefixes, deltas, and short Heartbeat.
+- [Codex adapter](references/adapters/codex.md): provisioning and bounded monitoring.
+- [Context budget](references/context-budget.md): read limits and Coordinator saturation.
+- [Measurement notes](references/usage-evidence.md): evidence and reproducible public metrics.
 
-Phase 3-6 的一次性预检会生成 Evidence Digest、工程快照、恢复账本和 Context Packet，默认写到项目外临时目录，减少重复扫描和 Git 污染：
-
-```bash
-python3 scripts/dispatch_preflight.py docs/tasks/SPEC-042/task.yaml \
-  --project-root . --gate implementation \
-  --focus frontend/app/page.tsx \
-  --verification-command "python3 -m unittest"
-```
-
-## 文件职责
-
-- `SKILL.md`：触发后的操作顺序和按需读取路由。
-- `references/core-contract.md`：平台无关的不变量。
-- `references/task-examples.md`：Task、Worker Runtime 和 Evidence 结构示例。
-- `references/prompts.md`：Worker 与 Heartbeat Prompt。
-- `references/autonomy.md`：不确定性、恢复预算与硬 Blocker 判定。
-- `references/task-panel.md`：任务面板展示合同。
-- `references/closure.md`：终态 Gate 和用户收口报告。
-- `references/adapters/*.adapter.json`：机器可读 Provider 策略。
-- `references/adapters/*.md`：Provider 操作说明。
-- `references/schemas/`：正式数据结构。
-- `scripts/validate_pm_dispatch.py`：Gate、依赖图和资源锁校验。
-- `scripts/validate_skill_consistency.py`：检查监控周期、协议版本和 Runtime 契约跨文件一致。
-- `scripts/resolve_pm_dispatch.py`：能力、思考强度和 Provider 回退策略解析。
-- `scripts/adapter_protocol.py`：构建 Worker 操作 envelope 并解析 Provider 结果。
-- `scripts/reconcile_worker_liveness.py`：确定性处理续租、断线宽限、Attempt 过期和锁释放。
-- `scripts/record_runtime_event.py`：校验并追加不可变 Runtime Event，拒绝重复 ID 和时间倒序。
-- `scripts/migrate_pm_dispatch.py`：嵌入式 Task 到 Task v4/Runtime v1、旧 Evidence 到 v2 的保守迁移。
-- `scripts/render_task_panel.py`：有视图、限额和 RELEASE 折叠的五列任务面板。
-- `scripts/measure_context_baseline.py`：确定性测量看板、Task、Evidence、Prompt 和面板上下文表面。
-- `scripts/build_context_packet.py`：从事实源生成带来源 SHA 的精益 Context Packet。
-- `scripts/validate_context_packet.py`：校验 Packet、来源漂移、字符预算和 Prompt 全文读取权限。
-- `scripts/build_evidence_digest.py` / `scripts/validate_evidence_digest.py`：从 Evidence v2 派生并校验当前状态摘要。
-- `scripts/build_project_snapshot.py`：生成 Git、文件结构和焦点文件的确定性工程快照。
-- `scripts/manage_recovery_ledger.py`：按 Gate/失败指纹计数恢复路径并执行三路径熔断。
-- `scripts/dispatch_preflight.py`：串联摘要、快照、恢复账本和 Context Packet 的单入口预检。
-- `tests/`：契约、Resolver、迁移和 Gate 持久回归测试。
-
-机器事实源是 Schema、Adapter JSON 和 validator。README 不重新定义字段。
+Schema, Adapter JSON, Resolver, and Validator are authoritative. Documentation does not redefine the machine contract.

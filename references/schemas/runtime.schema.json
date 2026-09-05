@@ -77,6 +77,7 @@
       "properties": {
         "automation_id": {"type": "string", "minLength": 1},
         "coordinator_thread_id": {"type": "string", "minLength": 1},
+        "coordinator_epoch": {"type": "integer", "minimum": 1},
         "target_run_id": {"type": "string", "pattern": "^run-(?:(?:BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}|BATCH-[A-Z0-9]+(-[A-Z0-9]+)*)-(contract|impl|integration|verify|closure)-w[0-9]{2}$"},
         "context_policy": {"type": "string", "enum": ["coordinator"]},
         "scan_scope": {"type": "string", "enum": ["incremental"]},
@@ -135,19 +136,73 @@
         "provider_reasoning_effort": {"type": "string", "minLength": 1},
         "resolution_reason": {"type": "string", "minLength": 1},
         "design_fingerprint": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
-        "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]},
+        "status": {"type": "string", "enum": ["provisioning", "queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]},
         "allow_parallel": {"type": "boolean"},
         "started_at": {"type": ["string", "null"], "format": "date-time"},
         "finished_at": {"type": ["string", "null"], "format": "date-time"},
         "continuation_token": {"type": ["string", "null"], "minLength": 1},
         "event_cursor": {"type": ["string", "null"], "minLength": 1},
-        "last_operation": {"type": ["string", "null"], "enum": ["create", "send", "inspect", "wait", "rebind", "collect", "cancel", null]},
+        "last_operation": {"type": ["string", "null"], "enum": ["provision", "create", "send", "inspect", "wait", "rebind", "collect", "cancel", "rollback", null]},
         "last_idempotency_key": {"type": ["string", "null"], "minLength": 1},
+        "wait_budget": {"$ref": "#/$defs/wait_budget"},
+        "inspection_budget": {"$ref": "#/$defs/inspection_budget"},
+        "provisioning": {"$ref": "#/$defs/provisioning"},
+        "observation": {"$ref": "#/$defs/observation"},
         "attempts": {
           "type": "array",
           "minItems": 1,
           "items": {"$ref": "#/$defs/attempt"}
         }
+      }
+    },
+    "observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider_status", "observed_at", "progress_seq", "last_progress_at", "state", "reason", "attention_at", "command_id", "command_deadline"],
+      "properties": {
+        "provider_status": {"type": "string", "enum": ["running", "queued", "idle", "interrupted"]},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "progress_seq": {"type": "integer", "minimum": 0},
+        "last_progress_at": {"type": ["string", "null"], "format": "date-time"},
+        "state": {"type": "string", "enum": ["active", "waiting-command", "attention"]},
+        "reason": {"type": ["string", "null"], "enum": ["interrupted", "idle-without-outcome", "no-progress", null]},
+        "attention_at": {"type": ["string", "null"], "format": "date-time"},
+        "command_id": {"type": ["string", "null"], "minLength": 1},
+        "command_deadline": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "wait_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "max_calls", "max_timeout_ms", "enforced_at"],
+      "properties": {
+        "policy": {"type": "string", "enum": ["single-short"]},
+        "max_calls": {"type": "integer", "enum": [1]},
+        "max_timeout_ms": {"type": "integer", "enum": [30000]},
+        "enforced_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "inspection_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "min_interval_seconds", "max_calls_per_cycle", "enforced_at"],
+      "properties": {
+        "policy": {"type": "string", "enum": ["incremental-debounce"]},
+        "min_interval_seconds": {"type": "integer", "enum": [600]},
+        "max_calls_per_cycle": {"type": "integer", "enum": [1]},
+        "enforced_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "provisioning": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["transaction_id", "status", "started_at", "deadline_at", "finished_at", "failure"],
+      "properties": {
+        "transaction_id": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "enum": ["pending", "completed", "rolled-back"]},
+        "started_at": {"type": "string", "format": "date-time"},
+        "deadline_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": ["string", "null"], "format": "date-time"},
+        "failure": {"type": ["string", "null"]}
       }
     },
     "attempt": {
@@ -156,7 +211,7 @@
       "required": ["attempt_id", "status"],
       "properties": {
         "attempt_id": {"type": "string", "pattern": "^attempt-(?:(?:BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}|BATCH-[A-Z0-9]+(-[A-Z0-9]+)*)-(contract|impl|integration|verify|closure)-w[0-9]{2}-a[0-9]{2}$"},
-        "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]},
+        "status": {"type": "string", "enum": ["provisioning", "queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]},
         "started_at": {"type": ["string", "null"], "format": "date-time"},
         "finished_at": {"type": ["string", "null"], "format": "date-time"},
         "prompt_file": {"type": ["string", "null"]},

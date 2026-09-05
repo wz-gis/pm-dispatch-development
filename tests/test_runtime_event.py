@@ -76,6 +76,18 @@ class RuntimeEventCase(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("duplicate event_id", result.stderr)
 
+    def test_rejects_missing_event_log_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_bundle(root)
+            runtime_path = root / "runtime.yaml"
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime["event_log_file"] = ""
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+            result = self.run_event(root, "evt-001")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires event_log_file", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

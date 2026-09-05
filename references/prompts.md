@@ -1,42 +1,62 @@
 # Worker Prompts
 
+Use a stable prefix followed by task-specific data. Keep prefix wording/order unchanged within a project; translate it once if needed, not on every continuation.
+
 ## Worker
 
 ```markdown
-【稳定执行契约；所有 Worker 保持原文和顺序】
-上下文：Context Packet 是默认注入入口；只读 Packet 与其中点名的源码/Artifact，不默认全文读取 Task、Evidence、Runtime、看板或历史
-摘要：优先消费 Packet 引用的 Evidence Digest 与工程快照；它们是派生摘要，来源 SHA 漂移时停止并回报 PM
-恢复：普通失败留在本 Worker/Attempt；同一方法最多失败 2 次，同一 Gate/失败指纹最多 3 种恢复路径，熔断打开后先修复契约并 reset
-通知：仅在方案确认、核心编辑完成、复验完成、不可逆边界、终态发送 1-2 句里程碑
-Lease：每条通知携带 progress_seq；终态 delegation 前更新最后进度。不要自行创建并行替代 Worker
-终态 delegation：status、run/attempt、commit/files、verification artifact IDs、hard blocker/user action、next action
+[Stable execution contract]
+Context: Read the validated Context Packet and its named source/Artifacts, not full Task/Evidence/Runtime, boards, or history by default.
+Summaries: Prefer referenced Evidence Digest and project snapshot. Report semantic source drift to the PM before proceeding.
+Recovery: Stay in this Worker/Attempt. Record the first failure in the task's canonical ledger; authorize before each retry, then record its outcome. At most 2 same-method failures and 3 failed paths per Gate/fingerprint. An open breaker allows inspection only; resets require changed-state evidence. See autonomy.md on failure.
+Milestones: Send 1-2 sentences after the decision, core edit, focused verification, irreversible boundary, and terminal state.
+Lease: Include progress_seq in each milestone; persist final progress before terminal delegation. Never create a parallel replacement Worker.
+Terminal delegation: status, run/attempt, commit/files, verification Artifact IDs, hard blocker/user action, next action.
 
-【动态任务后缀；不得放在稳定前缀之前】
-任务：SPEC-042 P1 WEB 新增页面
-身份：SPEC-042-impl-w01 / run-SPEC-042-impl-w01 / attempt-SPEC-042-impl-w01-a01
-Resolution：provider=codex，model_id=null（发布端默认模型），reasoning_profile=standard，provider_effort=inherit
-Context Packet：<packet_path> / <packet_sha256>；先运行 validate_context_packet.py
-差量目标：<本轮唯一目标；首轮使用 Packet objective，续跑只写新增目标>
-相关源码：<exact source paths；没有则写 none>
-必需输出：commit/files、Packet 中的 evidence gaps、hard blocker/user action、next action
+[Dynamic task suffix]
+Task: SPEC-002 P1 WEB Add settings page
+Identity: SPEC-002-impl-w01 / run-SPEC-002-impl-w01 / attempt-SPEC-002-impl-w01-a01
+Resolution: provider=codex, model_id=null (host default), reasoning_profile=standard, provider_effort=inherit
+Context Packet: <path> / <sha256>; validate before use
+Delta: <one objective; initial Packet objective or continuation delta>
+Sources: <exact source paths, or none>
+Output: commit/files, Packet evidence gaps, hard blocker/user action, next action
 ```
 
-稳定前缀不得包含 Task ID、Worker ID、时间戳、Run/Attempt、路径或进度；动态字段统一放到后缀以提高可复用前缀命中。分发前冻结设计，运行 `build_context_packet.py`，再用 `validate_context_packet.py <packet> --prompt <prompt>` 校验来源摘要、字符预算和全文读取权限。`single-worker` 续跑复用原 Worker，只发送新 Packet SHA、新 Run/Gate、差量目标和证据缺口，不重复粘贴 Skill、Task/Evidence、Runtime 或历史。
+Do not put IDs, timestamps, paths, Run/Attempt, or progress in the stable prefix. Freeze design and build/validate the Packet before dispatch. A `single-worker` continuation reuses the Worker and sends only Packet SHA, Run/Gate, delta, and evidence gaps. Preflight selects continuation automatically; its objective is explicit remaining work or `lifecycle.next_action`, never the full scope as fallback. Pass a pending `--recovery-attempt` when recovering.
 
-仅当 Packet 明确记录 `design-freeze-change`、`safety-boundary-change`、`contract-review`、`schema-migration`、`terminal-closure` 或 `forensic-diagnosis` 时，Prompt 才能要求全文读取；没有触发器必须 fail closed。行数不是预算，按 Packet 的字符预算执行。
+Full reads require a Packet trigger: `design-freeze-change`, `safety-boundary-change`, `contract-review`, `schema-migration`, `terminal-closure`, or `forensic-diagnosis`. Check character budgets, not line counts.
+
+## Thin Wrapper Worker
+
+Append only for `execution.delegation.mode=thin-wrapper-subagent`; details in `delegated-subagent.md`.
+
+```markdown
+[Stable thin-wrapper contract]
+Role: One visible Worker wraps one initial external implementation; no duplicate discovery or parallel coding.
+Invoke: Validate Packet, send milestone, discover installed definitions, then invoke execution.delegation.agent from this Worker's $PWD.
+Boundary: The sub-agent edits authorized sources and runs initial key tests. No PM-state edits, agent creation, monitoring, or Git commits.
+Collect: Inspect changed paths/diff, run Packet-focused verification, commit accepted work, and return Artifacts by terminal delegation.
+Recovery: Pre-execution launch failure may retry the same logical call. After partial/timeout, inspect Artifacts first; one delta repair requires concrete verification failure.
+Stop: Passed focused verification with no new evidence means stop.
+```
+
+Add only `Delegation: <agent> / initial=1 / repair=focused-failure-only` to the dynamic suffix. The external prompt references Packet path/SHA, one objective, exact sources, checks, and output fields, never PM history.
 
 ## Milestone
 
-运行中通知只包含 `progress_seq`、“刚完成什么、下一步什么”。PM 收到后更新 `lease.heartbeat_at` 并续租。终态 delegation 一次性回传结构化字段；PM 不周期性全文读取 Task、Evidence 或历史。
+Send `progress_seq`, what just finished, and the next action. The PM persists progress and renews the Lease; status-only renewal must not invent progress. Terminal delegation returns structured fields once.
 
 ## Event-Lease Watchdog
 
-PM 使用 Adapter 的 `event_wait_target` 等待终态事件，超时点等于 `lease.expires_at`。超时只调用一次 `inspect`：仍运行则续租同一 Attempt；终态则收口；不可达则宽限后再探测一次。第二次仍不可达才将 Attempt 置为 `expired`、释放锁并从最后 Artifact/进度恢复。Lease 超时本身不是 Blocker。
+Authorize one post-create zero-wait inspection. A positive terminal wait needs atomic authorization, at most 30 seconds once per Run; end the turn after timeout. Later Heartbeats use the tick planner and a unique cycle ID. Preserve Attempt/locks on unreachability, then probe once after the grace period; recover only after confirmed irrecoverability.
 
 ## Heartbeat
 
 ```markdown
-每10分钟在当前分发任务中增量检查 <run_id>/<worker_id>：只读 Worker 状态、Lease、最新里程碑。无变化只续租；里程碑/终态/安全或冻结设计变化才全文收口。监控不可用标 unknown 并保留 Attempt/锁，恢复后 reconcile。不要创建监控 Worker。
+Every 10m run plan_monitor_tick.py here. Sleep: stop. Inspect: authorize one wait_threads(timeoutMs=0); read status, Lease, latest milestone. Reconcile changes; offline=unknown, retain ownership. No loops/new monitor.
 ```
 
-Heartbeat 必须运行在分发任务线程中，Automation 的 `target_thread_id` 等于 `coordinator_thread_id`，且不得指向 Worker。配置固定为 `context_policy=coordinator`、`scan_scope=incremental`、`lightweight=true`、三项 `read_set`、四项 `full_scan_triggers` 和 `interval_minutes=10`；不得创建第二个监控任务，模板替换后不得超过 240 字符。
+Bind to the current Coordinator: `target_thread_id=coordinator_thread_id`, never the Worker. Keep the substituted prompt within 240 characters. Zero waits consume inspection authorization, not the positive-wait budget. Same-cycle replay is forbidden; scheduled checks are at least 600 seconds apart. No positive Heartbeat wait.
+
+Reconcile once with `reconcile_worker_liveness.py --write`. Only the first `diagnosis-required` result allows a focused diagnosis; `awaiting-diagnosis` does not send another "continue". Idle/interrupted never means successful completion. After verified terminal collection, append `terminal-collected` and stop the host Automation; a planner `stop` is a decision, not the host action itself.

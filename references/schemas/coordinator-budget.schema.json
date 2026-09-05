@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pm-dispatch.local/coordinator-budget.schema.json",
+  "title": "PM Dispatch Coordinator Budget",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "thread_id", "epoch", "session_file", "usage", "budget", "action", "reasons", "measured_at"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1"]},
+    "thread_id": {"type": "string", "minLength": 1},
+    "epoch": {"type": "integer", "minimum": 1},
+    "session_file": {"type": ["string", "null"]},
+    "usage": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["last_input_tokens", "model_steps", "model_context_window", "total_input_tokens", "cached_input_tokens"],
+      "properties": {
+        "last_input_tokens": {"type": "integer", "minimum": 0},
+        "model_steps": {"type": "integer", "minimum": 0},
+        "model_context_window": {"type": "integer", "minimum": 0},
+        "total_input_tokens": {"type": "integer", "minimum": 0},
+        "cached_input_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["warn_input_tokens", "rollover_input_tokens", "max_model_steps"],
+      "properties": {
+        "warn_input_tokens": {"type": "integer", "minimum": 1},
+        "rollover_input_tokens": {"type": "integer", "minimum": 1},
+        "max_model_steps": {"type": "integer", "minimum": 1}
+      }
+    },
+    "action": {"type": "string", "enum": ["continue", "warn", "handoff-required", "unknown"]},
+    "reasons": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "measured_at": {"type": "string", "format": "date-time"}
+  }
+}

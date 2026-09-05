@@ -24,6 +24,7 @@
   "components": {
     "worker": {
       "transport": "command",
+      "visibility": "provider-visible",
       "create": {
         "target": "agent start --json",
         "input_fields": ["title", "prompt", "reasoning_effort"],

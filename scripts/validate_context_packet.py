@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import re
 import sys
@@ -22,6 +21,12 @@ from validate_pm_dispatch import (  # noqa: E402
     load_structured_file,
     validate_schema,
 )
+from context_source_digest import (  # noqa: E402
+    RAW_FILE_V1,
+    canonical_sha256,
+    source_sha256,
+)
+from manage_recovery_ledger import default_path, execution_error, validate_ledger  # noqa: E402
 
 
 FULL_READ_PATTERNS = (
@@ -47,6 +52,15 @@ def canonical_packet_payload(packet: dict[str, Any]) -> bytes:
     payload = copy.deepcopy(packet)
     payload.pop("generated_at", None)
     payload.pop("packet_sha256", None)
+    for source in payload.get("source_digests", {}).values():
+        if isinstance(source, dict):
+            source.pop("path", None)
+    for lock in payload.get("locks", []):
+        if isinstance(lock, dict):
+            lock.pop("lease_expires_at", None)
+    milestone = payload.get("execution", {}).get("latest_milestone")
+    if isinstance(milestone, dict):
+        milestone.pop("event_cursor", None)
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -56,11 +70,7 @@ def canonical_packet_payload(packet: dict[str, Any]) -> bytes:
 
 
 def packet_digest(packet: dict[str, Any]) -> str:
-    return "sha256:" + hashlib.sha256(canonical_packet_payload(packet)).hexdigest()
-
-
-def file_digest(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return canonical_sha256(json.loads(canonical_packet_payload(packet)))
 
 
 def prompt_requests_full_read(prompt: str) -> bool:
@@ -110,6 +120,12 @@ def validate_context_packet(
     if full_read_trigger and full_read_trigger not in budgets.get("full_read_triggers", []):
         errors.append(f"{packet_path}: full_read_trigger is not declared in full_read_triggers")
 
+    execute = packet.get("purpose", "execute") == "execute"
+    if execute and (packet.get("recovery") or {}).get("state") == "open":
+        errors.append(f"{packet_path}: circuit breaker is open; execution is forbidden")
+    if prompt_text is not None and (not execute or not check_sources):
+        errors.append(f"{packet_path}: Worker prompts require an executable packet with source checks")
+
     if check_sources:
         for source_name, source in packet.get("source_digests", {}).items():
             if source is None:
@@ -118,7 +134,19 @@ def validate_context_packet(
             if not source_path.is_file():
                 errors.append(f"{packet_path}: {source_name} source is missing: {source_path}")
                 continue
-            actual = file_digest(source_path)
+            digest_kind = str(source.get("digest_kind") or RAW_FILE_V1)
+            try:
+                document = (
+                    None
+                    if digest_kind == RAW_FILE_V1
+                    else load_structured_file(source_path)
+                )
+                actual = source_sha256(source_path, digest_kind, document)
+            except (json.JSONDecodeError, ValueError) as exc:
+                errors.append(
+                    f"{packet_path}: {source_name} source digest failed: {exc}"
+                )
+                continue
             if source.get("sha256") != actual:
                 errors.append(
                     f"{packet_path}: {source_name} source digest drift; expected "
@@ -133,6 +161,24 @@ def validate_context_packet(
                     errors.append(
                         f"{packet_path}: packet task id does not match source task"
                     )
+                ledger_path = default_path(task_path)
+                ledger_source = packet.get("source_digests", {}).get("recovery_ledger")
+                if execute and ledger_source and resolve_source_path(packet_path, ledger_source["path"]) != ledger_path:
+                    errors.append(f"{packet_path}: execution requires the canonical Task recovery ledger")
+                if execute and packet.get("mode") == "continuation" and packet["execution"].get("run_id") and not ledger_path.is_file():
+                    errors.append(f"{packet_path}: continuation is missing its canonical Recovery Ledger")
+                if ledger_path.is_file():
+                    ledger = load_structured_file(ledger_path)
+                    ledger_errors = validate_ledger(ledger, ledger_path, SCRIPT_DIR.parent / "references" / "schemas")
+                    errors.extend(ledger_errors)
+                    if ledger.get("task_id") != task.get("id"):
+                        errors.append(f"{packet_path}: Recovery Ledger task_id does not match Task")
+                    if execute and not ledger_source:
+                        errors.append(f"{packet_path}: canonical recovery ledger must be included in source digests")
+                    if execute and not ledger_errors:
+                        error = execution_error(ledger, packet["execution"]["gate"], packet.get("recovery_attempt"))
+                        if error:
+                            errors.append(f"{packet_path}: {error}")
 
     if prompt_text is not None:
         mode = prompt_mode or str(packet.get("mode") or "initial")

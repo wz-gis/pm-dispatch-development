@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -311,6 +313,22 @@ def load_panel_items(tasks_dir: Path) -> list[tuple[dict[str, Any], dict[str, An
     return items
 
 
+def write_panel_snapshot(path: Path, rendered: str, view: str, task_id: str | None) -> dict[str, Any]:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(rendered, encoding="utf-8")
+    temporary.replace(path)
+    return {
+        "mode": "delegated-read",
+        "path": str(path),
+        "sha256": "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        "chars": len(rendered),
+        "view": view,
+        "task_id": task_id,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render the current PM task panel.")
     parser.add_argument("--tasks-dir", required=True, help="Path to docs/tasks")
@@ -323,6 +341,10 @@ def main() -> int:
         help=f"Maximum output characters; default {DEFAULT_MAX_CHARS}",
     )
     parser.add_argument("--include-closed", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--output",
+        help="Write a reusable panel snapshot and print only compact metadata",
+    )
     args = parser.parse_args()
     limit = args.limit
     max_chars = args.max_chars
@@ -330,16 +352,21 @@ def main() -> int:
         limit = None if args.view == "all" or args.task_id else DEFAULT_LIMIT
     if max_chars is None:
         max_chars = None if args.view == "all" else DEFAULT_MAX_CHARS
-    print(
-        render_task_panel(
-            load_panel_items(Path(args.tasks_dir).resolve()),
-            include_closed=args.include_closed,
-            view=args.view,
-            task_id=args.task_id,
-            limit=limit,
-            max_chars=max_chars,
-        )
+    rendered = render_task_panel(
+        load_panel_items(Path(args.tasks_dir).resolve()),
+        include_closed=args.include_closed,
+        view=args.view,
+        task_id=args.task_id,
+        limit=limit,
+        max_chars=max_chars,
     )
+    if args.output:
+        metadata = write_panel_snapshot(
+            Path(args.output), rendered, args.view, args.task_id
+        )
+        print(json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+    else:
+        print(rendered)
     return 0
 
 

@@ -1,13 +1,18 @@
 # Codex Adapter
 
-仅在执行或恢复 `provider=codex` 的可见 Worker 时读取本文件。思考强度以 Resolver 生成的 Resolution 为准；模型不由 Skill 指定。
+Read only when creating or recovering a visible Codex Worker. Use Resolver effort; do not choose its model in the Skill.
 
-1. 运行 `scripts/resolve_pm_dispatch.py` 写入 Resolution。
-2. 冻结设计后运行 `build_context_packet.py`，再用 `validate_context_packet.py` 校验 Packet 与 Worker Prompt。来源漂移、超预算或未经授权的全文读取必须在 create/send 前停止。
-3. 运行 `scripts/adapter_protocol.py` 构建 v2 envelope。`create/send/cancel` 使用稳定幂等键；续接原线程用 `send`，断线恢复先 `rebind`，终态经 `wait` 后 `collect`。不得传 `model`；子 Worker 使用发布端默认模型配置。
-4. 使用 `worker_label` 作为可见标题；把真实 Thread ID、continuation token 和 event cursor 写入 Runtime 后，才允许 Run 进入 active 状态。
-5. 每次 create/send/rebind/cancel 和终态收集后，用 `record_runtime_event.py` 追加对应事件；不要改写已有事件行。
-6. 分发前冻结范围、用户可见契约、安全约束和验收项；把 `design_freeze.fingerprint` 复制到 Run。普通失败由原 Worker 在同一 Attempt 内恢复并聚焦复验；只有安全边界或冻结指纹变化才新建 Attempt。
-7. 默认采用 `heartbeat`：由分发任务线程每 10 分钟只读取 Worker 状态、Lease 和最新里程碑；里程碑、终态、安全边界或冻结设计变化才读取相关 Task/Evidence 完成收口。Automation 必须指向 `coordinator_thread_id`；不得创建独立监控 Worker/任务。
-8. 监控或网络不可用时调用 `reconcile_worker_liveness.py --probe-status monitor-unavailable`，保持原 Attempt 和锁。恢复后先检查原 Worker；只有 Provider 确认身份不可达且宽限复查仍失败才过期 Attempt、释放锁并恢复。
-9. `single-worker` 的后续 Run/Gate 使用原 `worker_id`，只发送新 Packet SHA、Gate 和差量；只有 `worker_reuse.replacement_triggers` 允许的原因才能创建替代 Worker。
+1. Resolve the route, freeze scope/contracts/safety/acceptance, and copy the fingerprint into the Run.
+2. Record the current PM conversation as the sole `coordinator_thread_id` with `coordinator_epoch`. Use `automation_update(kind=heartbeat)` to activate its Heartbeat for the intended Run, never for the Worker.
+3. Run `manage_dispatch_transaction.py begin` for a Run without a Worker ID. Provisioning defaults to 120 seconds; locks cannot outlive it.
+4. Run `dispatch_preflight.py`. It validates Heartbeat, Packet, and Coordinator budget. At 160K last-input tokens or 150 recorded model steps, stop creating new Workers; existing monitoring/closure remain allowed.
+5. For explicitly dispatched visible work, use `create_thread` with `worker_label`, omitting `model`. Once a real thread ID is available, run transaction `complete` to bind ID/Lease. On confirmed failure, stop Heartbeat and `rollback --heartbeat-stopped`. A queued `clientThreadId` is not a real thread ID; reconcile uncertain creation before retrying.
+6. Run `authorize_status_inspect.py --reason post-create --cycle-id <turn> --write`, then use its `native_arguments` for one zero-wait snapshot. Reference the authorization ID in the observation event; do not bypass authorization.
+7. If a short wait is needed, run `authorize_terminal_wait.py ... --timeout-ms 30000 --write`, call the returned arguments once, and record `terminal-wait-finished`. Each Run gets at most one positive wait. End the turn if unfinished.
+8. Every Heartbeat runs `plan_monitor_tick.py` once. `sleep`: stop. `inspect`: authorize a scheduled snapshot using the Heartbeat-run cycle ID, then persist `reconcile_worker_liveness.py --write` once. No positive waits or loops. `diagnosis-required` gets one focused check; `awaiting-diagnosis` never resends a continuation. Verified long commands use a fixed deadline, not a sliding timeout.
+9. Append events for mutations, observations, and terminal collection. Validate with `--codex-session-dir ~/.codex/sessions` to audit native waits that bypass authorization.
+10. Recover ordinary failures in the same Worker/Attempt using canonical `record`/`authorize` recovery entries. Idle/interrupted status (including `status.type`) requires reconciliation, not success or replacement. Preserve ownership during an outage; inspect the original Worker and its grace probe before replacement.
+11. Reuse `worker_id` across `single-worker` Gates. Preflight selects continuation; send only Packet SHA, Gate, and remaining objective. An open breaker permits `--purpose inspect`, not execution. Replacements require a declared trigger.
+12. Collect a confirmed terminal outcome once, append `terminal-collected`, stop the host Automation, and persist Heartbeat status. The planner's `stop` result does not itself call the host tool.
+
+These scripts authorize and audit calls; they do not hide or proxy the host's native MCP tools. Host scheduling, connectivity, and explicit task-creation permissions still apply.

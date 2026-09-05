@@ -1,6 +1,6 @@
 # Task And Evidence Examples
 
-这些片段展示结构和运行关系；完整字段与约束以 JSON Schema 为准。
+These fictional fragments illustrate structures and ownership, not a complete runnable bundle. Schemas define all required fields and constraints; generate current fingerprints rather than copying sample hashes.
 
 ## Contents
 
@@ -16,7 +16,7 @@
 docs/
 ├── dispatch-board.md
 └── tasks/
-    └── BUG-041/
+    └── BUG-001/
         ├── task.yaml
         ├── runtime.yaml
         ├── events.jsonl
@@ -30,14 +30,14 @@ docs/
 ```yaml
 schema_version: "4"
 runtime_file: runtime.yaml
-id: BUG-041
-display_name: BUG-041 P1 AA 最近诊断记录
-title: 最近诊断记录
+id: BUG-001
+display_name: BUG-001 P1 API Fix pagination
+title: Fix pagination
 type: bug
 priority: P1
 status: TRIAGED
 mode: single-project
-area: [AA]
+area: [API]
 lifecycle:
   phase: triage
   owner: pm
@@ -88,7 +88,7 @@ last_updated: 2026-07-13T12:00:00Z
 ```yaml
 # runtime.yaml
 schema_version: "1"
-task_id: BUG-041
+task_id: BUG-001
 task_schema_version: "4"
 resolution: null
 selected_at: 2026-07-13T12:00:00Z
@@ -140,14 +140,28 @@ dispatch:
   escalation_triggers: []
 ```
 
+For `Gemini execute SPEC-002`, append this delegation contract to `single-worker`; expand the topology, Heartbeat, and Worker prompt automatically. The agent alias must exist locally:
+
+```yaml
+dispatch:
+  delegation:
+    mode: thin-wrapper-subagent
+    agent: gemini-flash
+    initial_invocation_limit: 1
+    repair_invocation_limit: 1
+    retry_policy: focused-verification-failure-only
+```
+
+The visible Codex Worker retains Lease/Heartbeat ownership. The external agent implements only in that Worker's checkout; it cannot own PM state or commit.
+
 ```yaml
 # runtime.yaml
 schema_version: "1"
-task_id: SPEC-042
+task_id: SPEC-002
 task_schema_version: "4"
 resolution:
   provider: codex
-  adapter_version: "9"
+  adapter_version: "13"
   model_id: null
   reasoning_profile: standard
   provider_reasoning_effort: inherit
@@ -160,8 +174,9 @@ resolution:
 selected_at: 2026-07-13T12:00:00Z
 heartbeat:
   automation_id: automation-001
-  coordinator_thread_id: codex-thread:pm-id
-  target_run_id: run-SPEC-042-impl-w01
+  coordinator_thread_id: codex-thread:<current-pm-conversation-id>
+  coordinator_epoch: 1
+  target_run_id: run-SPEC-002-impl-w01
   context_policy: coordinator
   scan_scope: incremental
   read_set: [worker-status, lease, latest-milestone]
@@ -174,15 +189,15 @@ heartbeat:
   status: active
 resources: {locks: []}
 runs:
-  - run_id: run-SPEC-042-impl-w01
+  - run_id: run-SPEC-002-impl-w01
     gate: implementation
     worker_type: codex-thread
-    worker_name: SPEC-042-impl-w01
-    worker_label: SPEC-042 P1 WEB 新增页面 [impl w01]
+    worker_name: SPEC-002-impl-w01
+    worker_label: SPEC-002 P1 WEB Add settings page [impl w01]
     worker_id: codex-thread:thread-id
     worker_replacement_reason: null
     provider: codex
-    adapter_version: "9"
+    adapter_version: "13"
     model_id: null
     reasoning_profile: standard
     provider_reasoning_effort: inherit
@@ -192,17 +207,34 @@ runs:
     allow_parallel: false
     started_at: 2026-07-13T12:00:00Z
     finished_at: null
+    wait_budget:
+      policy: single-short
+      max_calls: 1
+      max_timeout_ms: 30000
+      enforced_at: 2026-07-13T12:00:00Z
+    inspection_budget:
+      policy: incremental-debounce
+      min_interval_seconds: 600
+      max_calls_per_cycle: 1
+      enforced_at: 2026-07-13T12:00:00Z
+    provisioning:
+      transaction_id: create-SPEC-002-a01
+      status: completed
+      started_at: 2026-07-13T11:59:30Z
+      deadline_at: 2026-07-13T12:01:30Z
+      finished_at: 2026-07-13T12:00:00Z
+      failure: null
     continuation_token: null
     event_cursor: null
     last_operation: create
-    last_idempotency_key: create-SPEC-042-a01
+    last_idempotency_key: create-SPEC-002-a01
     attempts:
-      - attempt_id: attempt-SPEC-042-impl-w01-a01
+      - attempt_id: attempt-SPEC-002-impl-w01-a01
         status: running
         started_at: 2026-07-13T12:00:00Z
         finished_at: null
         lease:
-          holder: run-SPEC-042-impl-w01
+          holder: run-SPEC-002-impl-w01
           acquired_at: 2026-07-13T12:00:00Z
           heartbeat_at: 2026-07-13T12:00:00Z
           expires_at: 2026-07-13T13:00:00Z
@@ -219,25 +251,27 @@ event_log_file: events.jsonl
 last_updated: 2026-07-13T12:00:00Z
 ```
 
-`events.jsonl` 每行一个 Runtime Event，例如：
+`events.jsonl` contains one Runtime Event per line, for example:
 
 ```json
-{"schema_version":"1","event_id":"evt-SPEC-042-001","event_type":"worker-created","task_id":"SPEC-042","occurred_at":"2026-07-13T12:00:00Z","run_id":"run-SPEC-042-impl-w01","attempt_id":"attempt-SPEC-042-impl-w01-a01","provider":"codex","worker_id":"codex-thread:thread-id","payload":{"idempotency_key":"create-SPEC-042-a01"}}
+{"schema_version":"1","event_id":"evt-SPEC-002-001","event_type":"worker-created","task_id":"SPEC-002","occurred_at":"2026-07-13T12:00:00Z","run_id":"run-SPEC-002-impl-w01","attempt_id":"attempt-SPEC-002-impl-w01-a01","provider":"codex","worker_id":"codex-thread:thread-id","payload":{"idempotency_key":"create-SPEC-002-a01"}}
 ```
+
+Codex v13 provisions before creation, then binds Worker/Lease on success. Before each zero wait, `authorize_status_inspect.py --write` records a unique permit; scheduled checks are at least 600 seconds apart. Positive waits retain the v12 single-short budget. Subsequent Heartbeats use the deterministic tick planner first.
 
 ## Context Packet
 
-Context Packet 由脚本生成，不手写、不作为事实源。典型切片如下：
+Generate Context Packets with scripts; do not hand-author or treat them as authoritative. This fragment contains illustrative hash placeholders and is not directly valid:
 
 ```json
 {
   "schema_version": "1",
   "derived": true,
   "mode": "initial",
-  "task": {"id": "SPEC-042", "schema_version": "4", "display_name": "SPEC-042 P1 WEB 新增页面", "title": "新增页面", "priority": "P1", "status": "IN_IMPL", "area": ["WEB"]},
-  "execution": {"run_id": "run-SPEC-042-impl-w01", "run_status": "running", "attempt_id": "attempt-SPEC-042-impl-w01-a01", "attempt_status": "running", "gate": "implementation", "design_fingerprint": "sha256:121c0df11c3afeca791046183aad696b7e3ca5492b81bfcbcfa5d5a21fc724d4", "latest_milestone": null},
-  "objective": "实现已冻结的新页面用户路径。",
-  "scope": {"allowed": ["src/page.tsx"], "prohibited": ["不得修改生产数据"], "constraints": []},
+  "task": {"id": "SPEC-002", "schema_version": "4", "display_name": "SPEC-002 P1 WEB Add settings page", "title": "Add settings page", "priority": "P1", "status": "IN_IMPL", "area": ["WEB"]},
+  "execution": {"run_id": "run-SPEC-002-impl-w01", "run_status": "running", "attempt_id": "attempt-SPEC-002-impl-w01-a01", "attempt_status": "running", "gate": "implementation", "design_fingerprint": "sha256:121c0df11c3afeca791046183aad696b7e3ca5492b81bfcbcfa5d5a21fc724d4", "delegation": null, "latest_milestone": null},
+  "objective": "Implement the frozen settings-page user path.",
+  "scope": {"allowed": ["src/page.tsx"], "prohibited": ["Do not modify production data"], "constraints": []},
   "confirmed_facts": [],
   "open_failure": null,
   "open_blockers": [],
@@ -246,7 +280,7 @@ Context Packet 由脚本生成，不手写、不作为事实源。典型切片�
   "evidence_gaps": ["L3 Browser"],
   "verification_commands": ["project-test-command"],
   "budgets": {"packet_max_chars": 8000, "initial_prompt_max_chars": 6000, "continuation_prompt_max_chars": 3000, "full_read_allowed": false, "full_read_trigger": null, "full_read_triggers": ["design-freeze-change", "safety-boundary-change", "contract-review", "schema-migration", "terminal-closure", "forensic-diagnosis"]},
-  "source_digests": {"task": {"path": "../task.yaml", "sha256": "sha256:..."}, "runtime": {"path": "../runtime.yaml", "sha256": "sha256:..."}, "evidence": null},
+  "source_digests": {"task": {"path": "../task.yaml", "sha256": "sha256:...", "digest_kind": "raw-file-v1"}, "runtime": {"path": "../runtime.yaml", "sha256": "sha256:...", "digest_kind": "runtime-context-v1"}, "evidence": null, "evidence_digest": null, "project_snapshot": null, "recovery_ledger": null},
   "generated_at": "2026-07-13T12:00:00Z",
   "packet_sha256": "sha256:..."
 }
@@ -270,7 +304,7 @@ quality_checks:
 
 ```yaml
 schema_version: "2"
-task_id: SPEC-042
+task_id: SPEC-002
 generated_at: 2026-07-13T12:30:00Z
 verification:
   changed_surface: [ui page]

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+import copy
 import json
 import os
 import sys
@@ -21,8 +21,15 @@ from validate_context_packet import (  # noqa: E402
     packet_digest,
     validate_context_packet,
 )
+from context_source_digest import (  # noqa: E402
+    EVIDENCE_DIGEST_V1,
+    PROJECT_SNAPSHOT_V1,
+    RAW_FILE_V1,
+    RUNTIME_CONTEXT_V1,
+    source_sha256,
+)
 from build_project_snapshot import validate_project_snapshot  # noqa: E402
-from manage_recovery_ledger import breaker_summary, validate_ledger  # noqa: E402
+from manage_recovery_ledger import breaker_summary, default_path, execution_error, validate_ledger  # noqa: E402
 from validate_evidence_digest import validate_evidence_digest  # noqa: E402
 from validate_pm_dispatch import (  # noqa: E402
     assert_supported_schema,
@@ -43,7 +50,7 @@ FULL_READ_TRIGGERS = [
     "terminal-closure",
     "forensic-diagnosis",
 ]
-ACTIVE_STATUSES = {"queued", "running"}
+ACTIVE_STATUSES = {"provisioning", "queued", "running"}
 FORBIDDEN_MARKERS = ("禁止", "不得", "不允许", "严禁", "must not", "forbid")
 
 
@@ -68,15 +75,20 @@ def compact_list(values: Iterable[Any], *, item_limit: int, count_limit: int) ->
     return result
 
 
-def sha256_file(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def source_digest(path: Path | None, output_path: Path) -> dict[str, str] | None:
+def source_digest(
+    path: Path | None,
+    output_path: Path,
+    digest_kind: str = RAW_FILE_V1,
+    document: dict[str, Any] | None = None,
+) -> dict[str, str] | None:
     if path is None or not path.exists():
         return None
     relative = os.path.relpath(path.resolve(), output_path.parent.resolve())
-    return {"path": relative, "sha256": sha256_file(path)}
+    return {
+        "path": relative,
+        "sha256": source_sha256(path, digest_kind, document),
+        "digest_kind": digest_kind,
+    }
 
 
 def select_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -113,7 +125,6 @@ def milestone_from_attempt(attempt: dict[str, Any] | None) -> dict[str, Any] | N
             if lease.get("last_progress_summary")
             else None
         ),
-        "event_cursor": lease.get("event_cursor"),
     }
 
 
@@ -295,7 +306,7 @@ def recovery_for_gate(
         return None, None
     summary = breaker_summary(entry)
     failure = entry.get("failure")
-    if not failure:
+    if not failure or failure.get("diagnosis_status") == "resolved":
         return summary, None
     open_failure = {
         "failure_class": failure["failure_class"],
@@ -366,6 +377,8 @@ def build_context_packet(
     recovery_ledger_path: Path | None = None,
     generated_at: str | None = None,
     schema_dir: Path | None = None,
+    purpose: str = "execute",
+    recovery_attempt: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     task_path = task_path.resolve()
     output_path = output_path.resolve()
@@ -440,24 +453,35 @@ def build_context_packet(
             )
         )
 
-    recovery_ledger_path = recovery_ledger_path or (
-        task_path.parent / "context" / "recovery-ledger.json"
-    )
+    canonical_ledger = default_path(task_path)
+    recovery_ledger_path = recovery_ledger_path or canonical_ledger
+    if purpose == "execute" and recovery_ledger_path.resolve() != canonical_ledger:
+        raise ValueError("execution requires the canonical Task recovery ledger; import legacy history first")
     recovery_ledger = None
     if recovery_ledger_path.exists():
         recovery_ledger = load_structured_file(recovery_ledger_path)
         source_errors.extend(
             validate_ledger(recovery_ledger, recovery_ledger_path, schema_dir)
         )
+        if recovery_ledger.get("task_id") != task["id"]:
+            source_errors.append("Recovery Ledger task_id does not match Task")
     if source_errors:
         raise ValueError("invalid PM sources:\n" + "\n".join(source_errors))
 
     effective = compose_task_runtime(task, runtime)
     run = select_run(effective.get("runs", []))
+    if purpose == "execute" and mode == "continuation" and run and run.get("worker_id") and recovery_ledger is None:
+        raise ValueError("continuation is missing its canonical Recovery Ledger; reconcile/import legacy history first")
     attempt = select_attempt(run)
     design_freeze = effective.get("dispatch", {}).get("design_freeze") or {}
     lifecycle = effective.get("lifecycle", {})
-    effective_gate = gate or (run.get("gate") if run else None)
+    effective_gate = gate or (run.get("gate") if run else None) or lifecycle.get("phase")
+    if effective_gate not in {"contract", "implementation", "integration", "verification", "closure"}:
+        effective_gate = None
+    if purpose == "execute" and recovery_ledger:
+        error = execution_error(recovery_ledger, effective_gate, recovery_attempt)
+        if error:
+            raise ValueError(error)
     recovery, recovery_failure = recovery_for_gate(recovery_ledger, effective_gate)
     next_action = lifecycle.get("next_action")
     accepted_scope = lifecycle.get("accepted_scope")
@@ -465,6 +489,8 @@ def build_context_packet(
         packet_objective = compact_text(objective, 700)
     elif mode == "continuation" and next_action:
         packet_objective = compact_text(next_action, 700)
+    elif mode == "continuation":
+        raise ValueError("continuation requires --objective or lifecycle.next_action; do not replay the full scope")
     else:
         packet_objective = compact_text(accepted_scope or effective.get("title"), 700)
 
@@ -513,7 +539,6 @@ def build_context_packet(
                 "mode": str(lock.get("mode") or "exclusive"),
                 "status": "active",
                 "holder_run_id": str(lock.get("holder_run_id") or "unknown-run"),
-                "lease_expires_at": lock.get("lease_expires_at"),
                 "scope": compact_text(lock.get("scope"), 300),
             }
         )
@@ -522,6 +547,8 @@ def build_context_packet(
         "schema_version": "1",
         "derived": True,
         "mode": mode,
+        "purpose": purpose,
+        "recovery_attempt": recovery_attempt,
         "task": {
             "id": effective["id"],
             "schema_version": str(task.get("schema_version")),
@@ -536,9 +563,12 @@ def build_context_packet(
             "run_status": run.get("status") if run else None,
             "attempt_id": attempt.get("attempt_id") if attempt else None,
             "attempt_status": attempt.get("status") if attempt else None,
-            "gate": gate or (run.get("gate") if run else None),
+            "gate": effective_gate,
             "design_fingerprint": (
                 run.get("design_fingerprint") if run else design_freeze.get("fingerprint")
+            ),
+            "delegation": copy.deepcopy(
+                effective.get("dispatch", {}).get("delegation")
             ),
             "latest_milestone": milestone_from_attempt(attempt),
         },
@@ -578,15 +608,21 @@ def build_context_packet(
         },
         "source_digests": {
             "task": source_digest(task_path, output_path),
-            "runtime": source_digest(runtime_path, output_path),
+            "runtime": source_digest(
+                runtime_path, output_path, RUNTIME_CONTEXT_V1, runtime
+            ),
             "evidence": source_digest(evidence_path if evidence_path.exists() else None, output_path),
             "evidence_digest": source_digest(
                 evidence_digest_path if evidence_digest_path.exists() else None,
                 output_path,
+                EVIDENCE_DIGEST_V1,
+                evidence_digest,
             ),
             "project_snapshot": source_digest(
                 project_snapshot_path if project_snapshot_path.exists() else None,
                 output_path,
+                PROJECT_SNAPSHOT_V1,
+                project_snapshot,
             ),
             "recovery_ledger": source_digest(
                 recovery_ledger_path if recovery_ledger_path.exists() else None,
@@ -628,6 +664,8 @@ def main() -> int:
     parser.add_argument("--output", help="Defaults to <task-dir>/context/active-context.json")
     parser.add_argument("--mode", choices=["initial", "continuation"], default="initial")
     parser.add_argument("--objective")
+    parser.add_argument("--purpose", choices=["execute", "inspect"], default="execute")
+    parser.add_argument("--recovery-attempt")
     parser.add_argument(
         "--gate",
         choices=["contract", "implementation", "integration", "verification", "closure"],
@@ -656,6 +694,8 @@ def main() -> int:
         output_path,
         mode=args.mode,
         objective=args.objective,
+        purpose=args.purpose,
+        recovery_attempt=args.recovery_attempt,
         gate=args.gate,
         allowed_scope=args.allowed_scope,
         prohibited_scope=args.prohibited_scope,

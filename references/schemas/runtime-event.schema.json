@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": {"type": "string", "enum": ["1"]},
     "event_id": {"type": "string", "minLength": 1},
-    "event_type": {"type": "string", "enum": ["resolution-selected", "worker-created", "prompt-sent", "status-observed", "lease-renewed", "milestone", "worker-rebound", "terminal-collected", "lock-acquired", "lock-released"]},
+    "event_type": {"type": "string", "enum": ["resolution-selected", "dispatch-provisioning-started", "dispatch-provisioning-completed", "dispatch-provisioning-rolled-back", "worker-created", "prompt-sent", "status-inspect-authorized", "status-observed", "lease-renewed", "milestone", "worker-rebound", "terminal-wait-authorized", "terminal-wait-finished", "terminal-collected", "lock-acquired", "lock-released"]},
     "task_id": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"},
     "occurred_at": {"type": "string", "format": "date-time"},
     "run_id": {"type": ["string", "null"]},

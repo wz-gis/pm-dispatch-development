@@ -40,10 +40,12 @@ class AdapterContractCase(unittest.TestCase):
             {"worker", "reasoning", "monitor", "evidence"},
         )
         self.assertEqual(adapter["schema_version"], "3")
-        self.assertEqual(adapter["adapter_version"], "9")
+        self.assertEqual(adapter["adapter_version"], "13")
         worker = adapter["components"]["worker"]
         self.assertEqual(adapter["protocol_version"], "2")
         self.assertIn(worker["transport"], {"tool", "command", "api", "manual"})
+        self.assertEqual(worker["visibility"], "user-visible")
+        self.assertEqual(worker["create"]["target"], "create_thread")
         for operation in ("create", "send", "inspect", "wait", "rebind", "collect", "cancel"):
             self.assertTrue(worker[operation]["target"])
             self.assertTrue(worker[operation]["input_fields"])
@@ -52,6 +54,19 @@ class AdapterContractCase(unittest.TestCase):
         self.assertEqual(worker["create"]["idempotency"], "required")
         self.assertEqual(worker["send"]["idempotency"], "required")
         self.assertEqual(worker["rebind"]["idempotency"], "optional")
+        self.assertEqual(worker["inspect"]["target"], "wait_threads")
+        self.assertEqual(worker["inspect"]["fixed_inputs"], {"timeout_ms": 0})
+        self.assertIn("timeout_ms", worker["wait"]["input_fields"])
+        self.assertNotIn("timeout_ms", worker["wait"]["optional_input_fields"])
+        self.assertEqual(
+            worker["wait"]["call_policy"],
+            {
+                "max_calls_per_run": 1,
+                "max_timeout_ms": 30000,
+                "allowed_sources": ["coordinator"],
+            },
+        )
+        self.assertEqual(worker["wait"]["timeout_seconds"], 30)
         self.assertTrue(adapter["status_map"])
 
     def test_adapter_maps_every_core_reasoning_profile(self) -> None:
@@ -68,10 +83,15 @@ class AdapterContractCase(unittest.TestCase):
         )
         monitor = adapter["components"]["monitor"]
         self.assertEqual(monitor["modes"][0], "heartbeat")
+        self.assertEqual(monitor["heartbeat_operation"], "automation_update")
         self.assertEqual(monitor["heartbeat_target"], "coordinator-thread")
+        self.assertEqual(monitor["coordinator_binding"], "current-conversation")
         self.assertIn("event-lease", monitor["modes"])
         self.assertEqual(monitor["event_wait_target"], "wait_threads")
         self.assertEqual(monitor["disconnect_probe_operation"], "inspect")
+        self.assertEqual(monitor["inspection_interval_seconds"], 600)
+        self.assertEqual(monitor["max_inspections_per_cycle"], 1)
+        self.assertEqual(monitor["model_free_tick"], "scripts/plan_monitor_tick.py")
 
     def test_event_lease_adapter_requires_wait_and_watchdog_capabilities(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
@@ -86,6 +106,33 @@ class AdapterContractCase(unittest.TestCase):
         adapter["components"]["monitor"].pop("heartbeat_target")
         errors = validator.validate_adapter_integrity(adapter, "adapter")
         self.assertTrue(any("heartbeat_target=coordinator-thread" in error for error in errors))
+
+    def test_codex_adapter_rejects_internal_worker_or_detached_monitor(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["components"]["worker"]["visibility"] = "internal"
+        adapter["components"]["worker"]["create"]["target"] = "spawn_agent"
+        adapter["components"]["monitor"]["heartbeat_operation"] = "create_thread"
+        adapter["components"]["monitor"]["coordinator_binding"] = "declared-thread"
+        errors = validator.validate_adapter_integrity(adapter, "adapter")
+        self.assertTrue(any("user-visible Worker" in error for error in errors))
+        self.assertTrue(any("created with create_thread" in error for error in errors))
+        self.assertTrue(any("created with automation_update" in error for error in errors))
+        self.assertTrue(any("current PM conversation" in error for error in errors))
+
+    def test_codex_adapter_rejects_blocking_inspect_or_implicit_terminal_wait(self) -> None:
+        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter["components"]["worker"]["inspect"]["fixed_inputs"] = {
+            "timeout_ms": 120_000
+        }
+        adapter["components"]["worker"]["wait"]["input_fields"].remove("timeout_ms")
+        adapter["components"]["worker"]["wait"]["optional_input_fields"].append(
+            "timeout_ms"
+        )
+        adapter["components"]["worker"]["wait"]["call_policy"]["max_calls_per_run"] = 2
+        errors = validator.validate_adapter_integrity(adapter, "adapter")
+        self.assertTrue(any("zero-wait" in error for error in errors))
+        self.assertTrue(any("explicit timeout_ms" in error for error in errors))
+        self.assertTrue(any("single-short" in error for error in errors))
 
     def test_schema_rejects_adapter_without_version(self) -> None:
         adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))

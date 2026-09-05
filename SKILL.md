@@ -1,74 +1,76 @@
 ---
 name: pm-dispatch-development
-description: Use when managing software delivery through PM task boards, worker dispatch, Run/Attempt/Lease recovery, dependency and resource-lock safety, structured acceptance evidence, or VERIFIED/BLOCKED closure across one or more projects.
+description: Coordinate bug fixes and feature delivery with task boards, recoverable Workers, evidence-based gates, and bounded monitoring.
 ---
 
-# PM 调度式开发
+# PM Dispatch Development
 
-## Principle
-
-Task/Evidence 是事实源，Worker 是可恢复执行器；仅凭机器 Evidence 更新 Gate。可逆即推进，只有硬 Blocker 才停止。
+Task/Evidence are authoritative; Workers recoverable. Gate updates need validated Evidence. Use the user's language; preserve keys/IDs.
 
 ## Fast Execution
 
-选最低足够的模型/effort；无新证据，不新增探索或重复检查；证据足够后立即实施；只验正确性关键路径和必要回归；不为无证据的未来风险扩围；关键验证通过且无新证据即停。
+1. Use the lowest sufficient model/effort allowed by the selected Adapter.
+2. Without new evidence, do not expand exploration or repeat checks.
+3. Implement once evidence is sufficient.
+4. Verify correctness-critical paths and necessary regressions.
+5. Do not expand scope for hypothetical future risks.
+6. Stop after key checks pass unless new evidence appears.
+
+Proceed with reversible work; stop only for hard Blockers. Except: high risk, security, data consistency.
 
 ## Load Only What You Need
 
-- 面板运行 `scripts/render_task_panel.py --view actionable`；改格式读 `references/task-panel.md`。
-- 创建/修复 Task/Evidence/Runtime 或解释 Validator 错误时读 `references/core-contract.md` 与 Schema。
-- 遇到不确定性、恢复失败或准备标记 Blocked 时读取 `references/autonomy.md`。
-- 需要 YAML 示例读 `references/task-examples.md`；需要 Worker/Heartbeat Prompt 读 `references/prompts.md`。
-- 分发先跑 Resolver/Adapter，再生成并校验 Context Packet；不要把 JSON 加载进上下文；Codex 细则读 `references/adapters/codex.md`。
-- Phase 3-6：先生成 Evidence Digest、工程快照、恢复账本，再用 `dispatch_preflight.py` 生成 Packet；不把完整历史注入 Worker。
-- 其它 Agent、CI 或人工执行读 `references/adapters/generic.md`。
-- Worker 或任务终态时读 `references/closure.md` 收口。
-- 修改本 Skill 时运行测试和 `quick_validate.py`。
+- Boards: `render_task_panel.py --view actionable`; layout in `references/task-panel.md`.
+- Records/Validator issues: `references/core-contract.md` and relevant Schema.
+- Uncertainty/recovery/Blockers: `references/autonomy.md`.
+- Examples: `references/task-examples.md`; prompts: `references/prompts.md`.
+- Gemini/DeepSeek execution ("Gemini执行"/"DeepSeek执行"): `references/delegated-subagent.md`.
+- Read-only: `references/delegated-read.md`; no Task/Run/Heartbeat.
+- Dispatch: run Resolver/Adapter, validate Packet; no raw JSON by default. Codex: `references/adapters/codex.md`; others: `references/adapters/generic.md`.
+- Token issues: `references/context-budget.md`; terminal reporting: `references/closure.md`.
+- Skill edits: tests, consistency checks, `quick_validate.py`. Never inject README into Workers.
 
-Schema、Adapter、Resolver、Validator 是机器事实源。Task v4 保存契约，Runtime v1 保存运行态，Evidence v2 保存证据；Task v3 仅兼容读取。
+Machine contracts: Task v4 / Runtime v1 / Evidence v2; Task v3 is read/migrate only.
 
-## Naming
+## Naming And Strategy
 
-ID 用 `BUG-041`；Worker/Run/Attempt 用 `BUG-041-impl-w01`、`run-BUG-041-impl-w01`、`attempt-BUG-041-impl-w01-a01`。类型支持 `BUG`、`SPEC`、`ONBOARD`、`RELEASE`、`ENV`、`CHORE`。
+Display: `BUG-001 P1 API Fix pagination`; execution IDs: `BUG-001-impl-w01`, `run-...`, and `attempt-...-a01`. Prefixes: BUG, SPEC, ONBOARD, RELEASE, ENV, CHORE.
 
-## Strategy
+- `direct`: low-risk work in this conversation.
+- `single-worker`: one task-sticky Worker reused across Gates.
+- `batch-worker`: one Worker for 2-4 related tasks in the same project/Gate.
+- `full-dispatch`: serial high-risk, cross-project delivery.
 
-- `direct`：低风险本线程处理。
-- `single-worker`：任务级粘性 Worker 跨 Gate 复用。
-- `batch-worker`：2-4 个同工程同 Gate 任务共享。
-- `full-dispatch`：高风险跨工程链路串行。
-
-默认选最轻的可验证策略；跨 Owner、仓库或资源冲突时升级。
+Choose the lightest verifiable strategy; escalate owner/repository/resource conflicts.
 
 ## Workflow
 
 1. **Inspect**
-   - 读取 actionable 面板和 Packet，优先使用 Digest/快照；仅受保护触发器允许全文读取，编辑前检查 Git。
+   - Read panels/Packets, then referenced sources. Full reads need a protected trigger. Check Git before edits.
 
 2. **Define**
-   - 确定类型、优先级、Area、策略、`reasoning_profile`、能力、验收面。
-   - 按 Schema 定义用户路径、存量数据、运行形态、L0-L4、质量检查、停止条件、下一步。
-   - 分发前冻结范围、用户可见契约、安全约束和验收项并生成指纹。实现方式、文件布局、命令和普通测试失败不属于冻结设计变化。
+   - Record type, priority, area, strategy, effort, capabilities, user path/runtime, L0-L4 evidence, checks, stop conditions.
+   - Freeze/fingerprint scope, visible contracts, safety constraints, and acceptance before dispatch. Methods, files, commands, and ordinary test failures do not change it.
 
-3. **Check safety**
-   - 批量或并行前运行全局 Validator；依赖异常、锁冲突、并发超限、Attempt/Lease 无效时只停止受影响的分发。
-   - 首次命令、构建或测试失败不是 Blocker；同一 Worker 做同方法重试、替代路径和聚焦复验，保持同一 Attempt。
-   - 同一 Gate 的同一失败指纹最多记录两次同方法失败、三条不同恢复路径；恢复账本打开熔断后，必须先修复契约或设计并显式 reset，禁止盲目新建 Worker。
+3. **Check Safety**
+   - Validate before batch/parallel dispatch. Dependency, lock, concurrency, Attempt, or Lease errors block only the affected action.
+   - Ordinary failure stays in the same Worker/Attempt: record, repair, verify once.
+   - Use the task's canonical `manage_recovery_ledger.py`: `record` the first failure, `authorize` before retries. Limits: 2 same-method failures, 3 failed paths. An open breaker blocks execution, not inspection; resets need changed-state evidence.
 
 4. **Dispatch**
-   - 运行 Resolver 生成 `resolution`；Task 不接受用户模型 ID。Codex 子 Worker 不传 `model`，跟随发布端的 Codex 默认模型配置；`reasoning_profile` 只映射思考强度。
-   - 用 Adapter v2 的 create/send/wait/rebind/collect 执行和续接；幂等键、Worker ID、token、cursor、Run/Attempt/Lease 和锁写入 Runtime，不得伪造 running。
-   - 默认使用用户可见 Worker；用户明确允许才使用内部 sub-agent。
-   - 分发任务线程每 10 分钟增量检查 Worker、Lease、里程碑；触发时才全文收口，不得再创建独立监控 Worker/任务。
-   - 监控不可用时标 `liveness_state=unknown` 并保留 Attempt/Lease/锁；恢复后先 reconcile 原 Worker。Provider 确认不可恢复且宽限复查失败才替换。
-   - `single-worker` 的新 Run 和 Gate 默认沿用原 `worker_id`；换 Worker 必须记录允许的 `worker_replacement_reason`，普通 Gate 切换、补测试或补 Evidence 不是替换理由。
-   - 只有安全边界或受保护的冻结设计指纹变化时，取消当前 Attempt 并新建 Attempt；普通可恢复问题留在同一 Worker/Attempt 内修复。
-   - Prompt 必须通过 Packet 来源、预算和全文权限校验；续跑只发送新 Packet SHA、Gate 和差量。
+   - Resolve `resolution`; Task does not accept model IDs. Codex omits `model` and uses the dispatch host default, not a temporary parent override; profiles map effort only.
+   - This conversation is the sole PM Coordinator. Activate its Heartbeat before Worker creation; never target a Worker or create a second monitor task.
+   - Codex v13: `manage_dispatch_transaction.py begin` allows 120 seconds to provision. `dispatch_preflight.py` validates Packet/Coordinator budget; saturation blocks only new Workers.
+   - Explicit SPEC/BUG dispatch uses `create_thread` for a visible Worker (`direct`: none; batch: one). Complete the transaction with ID/Lease; on failure stop Heartbeat, then roll back.
+   - With `dispatch.delegation`, only the visible Worker invokes the selected external agent.
+   - Authorize the post-create zero-wait snapshot with `authorize_status_inspect.py`. Positive waits need `authorize_terminal_wait.py`: at most one 30-second wait per Run, never re-armed.
+   - Every 10 minutes, this Heartbeat runs `plan_monitor_tick.py`: authorize one zero-wait snapshot for `inspect`, then persist `reconcile_worker_liveness.py` once. `sleep`/unchanged stops. No loops or positive waits.
+   - Idle/interrupted is not completion. `diagnosis-required` gets one focused check; `awaiting-diagnosis` never auto-resumes. See `autonomy.md` for long commands.
+   - On outage, mark liveness unknown and retain ownership. Reconcile the original Worker first; replace only after confirmed irrecoverability and a failed grace probe.
+   - `single-worker` reuses `worker_id` across Gates; replacement requires a declared reason. Only safety-boundary or protected-freeze changes create a new Attempt.
+   - Validate Packet sources/budgets. Reuse selects continuation: Packet SHA, Gate, remaining objective only; no full-scope fallback.
 
-5. **Verify and close**
-   - 回收 commit、文件、命令、API、SQL、Browser、日志、质量检查和发布 Artifact；L0-L4 只能引用 Artifact ID。
-   - Validator 自动校验 required/conditional/skipped 质量检查及 Artifact，再更新 Gate；非终态失败留在原 Attempt 修复。
-   - 终态必须按 `references/closure.md` 主动报告状态、证据、缺口、用户动作、提交和唯一下一步。
-
-6. **Preflight**
-   - 用 `scripts/dispatch_preflight.py` 一次生成并校验 Digest、快照、账本和 Packet；默认输出到 `/tmp/pm-dispatch/<TASK-ID>`。
+5. **Verify And Close**
+   - Collect commit/file, command, API/SQL/browser, quality-check, and release artifacts. L0-L4 reference Artifact IDs.
+   - Validator computes required/conditional checks and validates Evidence before Gate updates. Ordinary failures remain in the current Attempt.
+   - Follow `references/closure.md`: report status, evidence, gaps, user action, commits, and one next step.

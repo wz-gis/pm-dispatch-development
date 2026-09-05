@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from validate_pm_dispatch import (  # noqa: E402
+    EVIDENCE_REQUIRED_STATUSES,
     assert_supported_schema,
     compose_task_runtime,
     design_freeze_fingerprint,
@@ -30,6 +31,15 @@ from validate_pm_dispatch import (  # noqa: E402
     validate_adapter_resolution,
     validate_schema,
     validate_task_runtime_layout,
+)
+from wait_policy import (  # noqa: E402
+    CODEX_WAIT_POLICY_ADAPTER_VERSION,
+    new_wait_budget,
+)
+from monitor_policy import (  # noqa: E402
+    CODEX_INSPECTION_POLICY_ADAPTER_VERSION,
+    PROVISIONING_DEFAULT_TTL_SECONDS,
+    new_inspection_budget,
 )
 
 
@@ -115,7 +125,7 @@ def migrate_task(
 ) -> dict[str, Any]:
     task = copy.deepcopy(source)
     if task.get("schema_version") == "3":
-        task = normalize_model_routes(task, adapters)
+        task = normalize_model_routes(task, adapters, now)
         return normalize_dispatch_efficiency_contract(task, now)
 
     task["schema_version"] = "3"
@@ -267,6 +277,19 @@ def migrate_task(
                 run.pop("model_reason", None) or resolution["reason"]
             )
             run.pop("model_tier", None)
+            if (
+                provider == "codex"
+                and int(resolution["adapter_version"]) >= CODEX_WAIT_POLICY_ADAPTER_VERSION
+                and run.get("status") in {"provisioning", "queued", "running"}
+            ):
+                run.setdefault("wait_budget", new_wait_budget(now))
+            if (
+                provider == "codex"
+                and int(resolution["adapter_version"])
+                >= CODEX_INSPECTION_POLICY_ADAPTER_VERSION
+                and run.get("status") in {"provisioning", "queued", "running"}
+            ):
+                run.setdefault("inspection_budget", new_inspection_budget(now))
         for lock in task.get("resources", {}).get("locks", []):
             holder = str(lock.get("holder_run_id") or "")
             if holder in run_id_map:
@@ -364,7 +387,7 @@ def normalize_dispatch_efficiency_contract(
             )
         if worker_id:
             previous_worker_id = str(worker_id)
-        if run.get("status") in {"queued", "running"}:
+        if run.get("status") in {"provisioning", "queued", "running"}:
             run["design_fingerprint"] = fingerprint
         else:
             run.setdefault("design_fingerprint", fingerprint)
@@ -386,7 +409,9 @@ def normalize_dispatch_efficiency_contract(
     heartbeat = dispatch.get("heartbeat")
     if isinstance(heartbeat, dict):
         active_runs = [
-            run for run in task.get("runs", []) if run.get("status") in {"queued", "running"}
+            run
+            for run in task.get("runs", [])
+            if run.get("status") in {"provisioning", "queued", "running"}
         ]
         coordinator_thread_id = heartbeat.get("coordinator_thread_id")
         if (
@@ -413,6 +438,7 @@ def normalize_dispatch_efficiency_contract(
         heartbeat.setdefault("prompt_max_chars", 220)
         heartbeat["interval_minutes"] = 10
         heartbeat["lightweight"] = True
+        heartbeat.setdefault("coordinator_epoch", 1)
     return task
 
 
@@ -432,7 +458,7 @@ def normalize_blockers(task: dict[str, Any]) -> None:
 
 
 def normalize_model_routes(
-    task: dict[str, Any], adapters: dict[str, dict[str, Any]]
+    task: dict[str, Any], adapters: dict[str, dict[str, Any]], now: str
 ) -> dict[str, Any]:
     """Normalize current Provider reasoning/model policy in an already-v3 Task."""
     dispatch = task.get("dispatch") or {}
@@ -464,13 +490,118 @@ def normalize_model_routes(
         capabilities.add("heartbeat")
         resolution["capabilities"] = sorted(capabilities)
     for run in task.get("runs", []):
-        if run.get("status") in {"queued", "running"}:
+        if run.get("status") in {"provisioning", "queued", "running"}:
             run["adapter_version"] = resolution["adapter_version"]
             run["model_id"] = resolution.get("model_id")
             run["provider_reasoning_effort"] = resolution["provider_reasoning_effort"]
+            if (
+                provider == "codex"
+                and int(resolution["adapter_version"]) >= CODEX_WAIT_POLICY_ADAPTER_VERSION
+            ):
+                run.setdefault("wait_budget", new_wait_budget(now))
+            if (
+                provider == "codex"
+                and int(resolution["adapter_version"])
+                >= CODEX_INSPECTION_POLICY_ADAPTER_VERSION
+            ):
+                run.setdefault("inspection_budget", new_inspection_budget(now))
         else:
             run.setdefault("model_id", resolution.get("model_id"))
     return task
+
+
+def normalize_runtime_routes(
+    task: dict[str, Any],
+    runtime: dict[str, Any],
+    adapters: dict[str, dict[str, Any]],
+    now: str,
+) -> dict[str, Any]:
+    """Upgrade only active Runtime facts; terminal Runs preserve history."""
+    resolution = runtime.get("resolution")
+    if task.get("dispatch", {}).get("strategy") == "direct" or not isinstance(resolution, dict):
+        return runtime
+    active_runs = [
+        run
+        for run in runtime.get("runs", [])
+        if run.get("status") in {"provisioning", "queued", "running"}
+    ]
+    if not active_runs and task.get("status") in EVIDENCE_REQUIRED_STATUSES:
+        return runtime
+    provider = str(resolution.get("provider") or "")
+    adapter = adapters.get(provider)
+    if not adapter:
+        raise MigrationError(f"worker task uses unknown provider {provider!r}")
+    profile = resolution.get("reasoning_profile") or task.get("dispatch", {}).get(
+        "reasoning_profile"
+    )
+    model_route = adapter.get("components", {}).get("model", {}).get("profiles", {}).get(profile)
+    if model_route:
+        resolution["model_id"] = model_route["model_id"]
+        resolution["provider_reasoning_effort"] = model_route["reasoning_effort"]
+    else:
+        resolution["model_id"] = None
+        resolution["provider_reasoning_effort"] = (
+            adapter.get("components", {})
+            .get("reasoning", {})
+            .get("profiles", {})
+            .get(profile)
+        )
+    resolution["adapter_version"] = str(adapter.get("adapter_version", "0"))
+    for run in active_runs:
+        run["adapter_version"] = resolution["adapter_version"]
+        run["model_id"] = resolution.get("model_id")
+        run["provider_reasoning_effort"] = resolution["provider_reasoning_effort"]
+        if (
+            provider == "codex"
+            and int(resolution["adapter_version"]) >= CODEX_WAIT_POLICY_ADAPTER_VERSION
+        ):
+            run.setdefault("wait_budget", new_wait_budget(now))
+        if (
+            provider == "codex"
+            and int(resolution["adapter_version"])
+            >= CODEX_INSPECTION_POLICY_ADAPTER_VERSION
+        ):
+            run.setdefault("inspection_budget", new_inspection_budget(now))
+    normalize_provisioning_runs(runtime, now)
+    heartbeat = runtime.get("heartbeat")
+    if isinstance(heartbeat, dict):
+        heartbeat.setdefault("coordinator_epoch", 1)
+    return runtime
+
+
+def normalize_provisioning_runs(runtime: dict[str, Any], now: str) -> None:
+    """Turn an incomplete Worker create into a bounded provisioning transaction."""
+    current = parse_time(now)
+    deadline = (current + timedelta(seconds=PROVISIONING_DEFAULT_TTL_SECONDS)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    provisioning_ids: set[str] = set()
+    for run in runtime.get("runs", []):
+        if run.get("status") != "queued" or run.get("worker_id"):
+            continue
+        attempts = [item for item in run.get("attempts", []) if isinstance(item, dict)]
+        if len(attempts) != 1 or attempts[0].get("lease") is not None:
+            continue
+        run["status"] = "provisioning"
+        run["last_operation"] = "provision"
+        attempts[0]["status"] = "provisioning"
+        attempts[0]["finished_at"] = None
+        transaction_id = f"provision-{run.get('run_id')}"
+        run["provisioning"] = {
+            "transaction_id": transaction_id,
+            "status": "pending",
+            "started_at": now,
+            "deadline_at": deadline,
+            "finished_at": None,
+            "failure": None,
+        }
+        provisioning_ids.add(str(run.get("run_id") or ""))
+    for lock in runtime.get("resources", {}).get("locks", []):
+        if (
+            lock.get("status") == "active"
+            and str(lock.get("holder_run_id") or "") in provisioning_ids
+        ):
+            lock["lease_expires_at"] = deadline
 
 
 def migrate_task_references(task: dict[str, Any]) -> None:
@@ -581,6 +712,7 @@ def split_task_runtime(
         "event_log_file": "events.jsonl",
         "last_updated": source.get("last_updated") or now,
     }
+    normalize_provisioning_runs(runtime, now)
     return task, runtime
 
 
@@ -765,10 +897,18 @@ def main() -> int:
                 if runtime_path is None or not runtime_path.exists():
                     raise MigrationError(f"{path}: Task v4 Runtime sidecar is missing")
                 runtime = load_structured_file(runtime_path)
+                original_runtime = copy.deepcopy(runtime)
+                runtime = normalize_runtime_routes(
+                    migrated_task,
+                    runtime,
+                    adapter_catalog,
+                    now,
+                )
             else:
                 embedded = migrate_task(document, adapter_catalog, now)
                 migrated_task, runtime = split_task_runtime(embedded, now)
                 runtime_path = path.parent / migrated_task["runtime_file"]
+                original_runtime = None
                 if args.write and runtime_path.exists():
                     raise MigrationError(
                         f"{path}: refusing to replace existing Runtime sidecar {runtime_path}"
@@ -798,7 +938,7 @@ def main() -> int:
                 {
                     "path": runtime_path,
                     "rendered": json.dumps(runtime, ensure_ascii=False, indent=2) + "\n",
-                    "changed": not runtime_path.exists(),
+                    "changed": not runtime_path.exists() or runtime != original_runtime,
                     "source_version": "1",
                     "new": not runtime_path.exists(),
                 }

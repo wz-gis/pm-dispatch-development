@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -48,26 +49,26 @@ class TaskPanelCase(unittest.TestCase):
 
     def test_panel_matches_snapshot(self) -> None:
         in_progress = task(
-            "BUG-041", "最近诊断记录", "P1", "IN_IMPL", "补 API/性能证据，再执行 L3/L4"
+            "BUG-001", "分页结果缺失", "P1", "IN_IMPL", "补充 API 验收证据"
         )
         blocked = task(
-            "BUG-033",
-            "规则保存启用与描述提取",
+            "BUG-002",
+            "设置保存失败",
             "P0",
             "ENV_BLOCKED",
-            "修复服务类加载环境后补 API/页面验收",
+            "恢复测试服务后补页面验收",
         )
         blocked["blockers"] = [
             {
                 "status": "open",
-                "description": "代码已修复，构建通过；服务类加载环境仍失败",
+                "description": "代码与构建通过；测试服务不可用",
             }
         ]
         pending = task(
-            "SPEC-004", "跨工程堆栈优先诊断", "P1", "NEW", "明确搜索范围、排序和权限"
+            "SPEC-003", "设置页面", "P1", "NEW", "确认页面范围和验收项"
         )
         partial = task(
-            "SPEC-001", "ZIP 源码包接入", "P1", "PARTIAL_VERIFIED", "补真实内网 ZIP L4"
+            "SPEC-004", "文件上传", "P1", "PARTIAL_VERIFIED", "补充真实上传路径验收"
         )
         items = [
             (
@@ -77,7 +78,7 @@ class TaskPanelCase(unittest.TestCase):
                         "levels": {
                             "L2": {
                                 "status": "pass",
-                                "summary": "来源归一化及历史回填中；自动测试已通过",
+                                "summary": "分页回归测试已通过",
                             }
                         }
                     }
@@ -147,6 +148,20 @@ class TaskPanelCase(unittest.TestCase):
             [(verified, None)], task_id="SPEC-099"
         )
         self.assertIn("SPEC-099", rendered)
+
+    def test_writes_reusable_delegated_read_snapshot(self) -> None:
+        rendered = self.renderer.render_task_panel(
+            [(task("SPEC-042", "父任务", "P1", "READY_FOR_IMPL", "实施"), None)]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "task-panel.md"
+            metadata = self.renderer.write_panel_snapshot(
+                output, rendered, "actionable", None
+            )
+            self.assertEqual(metadata["mode"], "delegated-read")
+            self.assertEqual(metadata["chars"], len(rendered))
+            self.assertTrue(metadata["sha256"].startswith("sha256:"))
+            self.assertEqual(output.read_text(encoding="utf-8").rstrip("\n"), rendered)
 
 
 if __name__ == "__main__":

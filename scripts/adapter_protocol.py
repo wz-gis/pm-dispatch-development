@@ -19,6 +19,7 @@ def build_invocation(
     operation_name: str,
     inputs: dict[str, Any],
     idempotency_key: str | None = None,
+    source: str = "coordinator",
 ) -> dict[str, Any]:
     if adapter.get("protocol_version") != "2":
         raise AdapterProtocolError(
@@ -31,16 +32,51 @@ def build_invocation(
 
     required = list(operation.get("input_fields", []))
     optional = list(operation.get("optional_input_fields", []))
+    fixed = operation.get("fixed_inputs") or {}
+    if not isinstance(fixed, dict):
+        raise AdapterProtocolError(f"{operation_name} fixed_inputs must be an object")
     declared = set(required) | set(optional)
     provided = set(inputs)
+    fixed_overrides = sorted(provided & set(fixed))
+    if fixed_overrides:
+        raise AdapterProtocolError(
+            f"{operation_name} cannot override fixed inputs: "
+            f"{', '.join(fixed_overrides)}"
+        )
     missing = sorted(set(required) - provided)
-    undeclared = sorted(provided - declared)
+    undeclared = sorted(provided - declared - set(fixed))
     if missing:
         raise AdapterProtocolError(f"{operation_name} missing inputs: {', '.join(missing)}")
     if undeclared:
         raise AdapterProtocolError(
             f"{operation_name} received undeclared inputs: {', '.join(undeclared)}"
         )
+    if adapter.get("provider") == "codex" and operation_name == "wait":
+        timeout_ms = inputs.get("timeout_ms")
+        if (
+            not isinstance(timeout_ms, int)
+            or isinstance(timeout_ms, bool)
+            or timeout_ms <= 0
+        ):
+            raise AdapterProtocolError("Codex terminal wait requires timeout_ms > 0")
+    call_policy = operation.get("call_policy") or {}
+    if call_policy:
+        allowed_sources = set(call_policy.get("allowed_sources") or [])
+        if source not in allowed_sources:
+            raise AdapterProtocolError(
+                f"{operation_name} is not allowed from source {source!r}"
+            )
+        max_timeout_ms = call_policy.get("max_timeout_ms")
+        timeout_ms = inputs.get("timeout_ms")
+        if (
+            isinstance(max_timeout_ms, int)
+            and isinstance(timeout_ms, int)
+            and not isinstance(timeout_ms, bool)
+            and timeout_ms > max_timeout_ms
+        ):
+            raise AdapterProtocolError(
+                f"{operation_name} timeout_ms exceeds {max_timeout_ms}"
+            )
 
     idempotency = operation.get("idempotency")
     if idempotency == "required" and not idempotency_key:
@@ -56,7 +92,7 @@ def build_invocation(
             field: inputs[field]
             for field in required + optional
             if field in inputs
-        },
+        } | fixed,
         "timeout_seconds": operation["timeout_seconds"],
     }
     if idempotency_key:
@@ -78,6 +114,13 @@ def extract_operation_result(
     if operation_name == "create" and not worker_id:
         raise AdapterProtocolError("create result did not contain a worker id")
     result = {"worker_id": worker_id, "status": status}
+    if adapter.get("provider") == "codex":
+        provider_status = raw_status.get("type") if isinstance(raw_status, dict) else raw_status
+        if provider_status in {"idle", "interrupted"}:
+            latest_turn = payload.get("latestTurn") or payload.get("latest_turn") or {}
+            turn_status = latest_turn.get("status") if isinstance(latest_turn, dict) else None
+            result["probe_status"] = "interrupted" if turn_status == "interrupted" else provider_status
+            result["requires_reconciliation"] = True
     for field in ("continuation_token", "event_cursor", "delegation"):
         path = result_paths.get(field)
         result[field] = extract_optional_path(payload, path)
@@ -85,7 +128,7 @@ def extract_operation_result(
 
 
 def normalize_status(adapter: dict[str, Any], raw_status: Any) -> str:
-    raw = str(raw_status)
+    raw = str(raw_status.get("type")) if isinstance(raw_status, dict) else str(raw_status)
     mappings = adapter.get("status_map") or []
     for mapping in mappings:
         if mapping.get("provider_status") == raw:
@@ -124,6 +167,12 @@ def main() -> int:
     )
     parser.add_argument("--inputs", default="{}", help="JSON object with operation inputs")
     parser.add_argument("--idempotency-key", help="Stable key for a mutating operation")
+    parser.add_argument(
+        "--source",
+        default="coordinator",
+        choices=["coordinator", "heartbeat"],
+        help="Invocation source used by operation call policy",
+    )
     parser.add_argument("--result", help="Optional provider result JSON to decode")
     args = parser.parse_args()
 
@@ -136,6 +185,7 @@ def main() -> int:
             args.operation,
             json.loads(args.inputs),
             args.idempotency_key,
+            args.source,
         )
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0

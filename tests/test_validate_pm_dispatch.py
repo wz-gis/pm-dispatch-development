@@ -206,7 +206,7 @@ def codex_run(task_id: str = "SPEC-101", index: int = 1) -> dict:
         "worker_id": f"codex-thread:thread-{index}",
         "worker_replacement_reason": None,
         "provider": "codex",
-        "adapter_version": "9",
+        "adapter_version": "13",
         "model_id": None,
         "reasoning_profile": "standard",
         "provider_reasoning_effort": "inherit",
@@ -216,6 +216,18 @@ def codex_run(task_id: str = "SPEC-101", index: int = 1) -> dict:
         "allow_parallel": index > 1,
         "started_at": NOW,
         "finished_at": None,
+        "wait_budget": {
+            "policy": "single-short",
+            "max_calls": 1,
+            "max_timeout_ms": 30000,
+            "enforced_at": NOW,
+        },
+        "inspection_budget": {
+            "policy": "incremental-debounce",
+            "min_interval_seconds": 600,
+            "max_calls_per_cycle": 1,
+            "enforced_at": NOW,
+        },
         "attempts": [
             {
                 "attempt_id": attempt_id,
@@ -261,7 +273,7 @@ def codex_dispatch() -> dict:
         },
         "resolution": {
             "provider": "codex",
-            "adapter_version": "9",
+            "adapter_version": "13",
             "model_id": None,
             "reasoning_profile": "standard",
             "provider_reasoning_effort": "inherit",
@@ -291,6 +303,7 @@ def codex_dispatch() -> dict:
         "heartbeat": {
             "automation_id": "automation-001",
             "coordinator_thread_id": "codex-thread:pm-1",
+            "coordinator_epoch": 1,
             "target_run_id": "run-SPEC-101-impl-w01",
             "context_policy": "coordinator",
             "scan_scope": "incremental",
@@ -312,6 +325,102 @@ def codex_dispatch() -> dict:
     }
 
 
+def thin_wrapper_delegation() -> dict:
+    return {
+        "mode": "thin-wrapper-subagent",
+        "agent": "gemini-flash-medium",
+        "initial_invocation_limit": 1,
+        "repair_invocation_limit": 1,
+        "retry_policy": "focused-verification-failure-only",
+    }
+
+
+def split_runtime(task: dict) -> tuple[dict, dict]:
+    task = copy.deepcopy(task)
+    dispatch = task["dispatch"]
+    runtime = {
+        "schema_version": "1",
+        "task_id": task["id"],
+        "task_schema_version": "4",
+        "resolution": dispatch.pop("resolution"),
+        "selected_at": dispatch.pop("selected_at"),
+        "heartbeat": dispatch.pop("heartbeat"),
+        "resources": task.pop("resources"),
+        "runs": task.pop("runs"),
+        "event_log_file": "events.jsonl",
+        "last_updated": task["last_updated"],
+    }
+    for run in runtime["runs"]:
+        run.setdefault("continuation_token", None)
+        run.setdefault("event_cursor", None)
+        run.setdefault("last_operation", None)
+        run.setdefault("last_idempotency_key", None)
+    task["schema_version"] = "4"
+    task["runtime_file"] = "runtime.yaml"
+    return task, runtime
+
+
+def wait_event(
+    event_id: str,
+    event_type: str,
+    occurred_at: str,
+    *,
+    source: str = "coordinator",
+) -> dict:
+    payload = {
+        "operation": "inspect",
+        "source": source,
+        "timeout_ms": 0,
+    }
+    if event_type == "terminal-wait-authorized":
+        payload = {"source": source, "timeout_ms": 30000, "event_cursor": None}
+    elif event_type == "terminal-wait-finished":
+        payload = {
+            "authorization_event_id": "wait-auth-001",
+            "outcome": "timeout",
+        }
+    elif event_type == "status-inspect-authorized":
+        payload = {
+            "source": source,
+            "reason": "scheduled",
+            "cycle_id": event_id,
+            "timeout_ms": 0,
+            "event_cursor": None,
+        }
+    return {
+        "schema_version": "1",
+        "event_id": event_id,
+        "event_type": event_type,
+        "task_id": "SPEC-101",
+        "occurred_at": occurred_at,
+        "run_id": "run-SPEC-101-impl-w01",
+        "attempt_id": "attempt-SPEC-101-impl-w01-a01",
+        "provider": "codex",
+        "worker_id": "codex-thread:thread-1",
+        "payload": payload,
+    }
+
+
+def native_wait_record(call_id: str, timestamp: str, timeout_ms: int = 30000) -> dict:
+    return {
+        "timestamp": timestamp,
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "item": {
+                "type": "McpToolCall",
+                "id": call_id,
+                "server": "codex_app",
+                "tool": "wait_threads",
+                "arguments": {
+                    "targets": [{"threadId": "thread-1"}],
+                    "timeoutMs": timeout_ms,
+                },
+            },
+        },
+    }
+
+
 class ValidatorCase(unittest.TestCase):
     def run_task(
         self,
@@ -324,6 +433,7 @@ class ValidatorCase(unittest.TestCase):
         automation_interval: int | None = None,
         automation_prompt: str = "增量检查目标 Run 的 Worker 状态、Lease 和最新里程碑；终态立即收口，监控不可用则保持所有权。",
         automation_target_thread_id: str | None = None,
+        codex_session_records: list[dict] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = Path(tmp) / task["id"]
@@ -379,6 +489,24 @@ class ValidatorCase(unittest.TestCase):
                     encoding="utf-8",
                 )
                 command.extend(["--automation-dir", str(automation_dir)])
+            if codex_session_records is not None:
+                session_dir = Path(tmp) / "sessions"
+                session_dir.mkdir()
+                heartbeat = (
+                    runtime.get("heartbeat")
+                    if runtime is not None
+                    else task.get("dispatch", {}).get("heartbeat")
+                ) or {}
+                coordinator_id = heartbeat.get("coordinator_thread_id", "coordinator")
+                session_path = session_dir / f"rollout-{coordinator_id}.jsonl"
+                session_path.write_text(
+                    "".join(
+                        json.dumps(record, ensure_ascii=False) + "\n"
+                        for record in codex_session_records
+                    ),
+                    encoding="utf-8",
+                )
+                command.extend(["--codex-session-dir", str(session_dir)])
             return subprocess.run(
                 command,
                 text=True,
@@ -647,6 +775,41 @@ class ValidatorCase(unittest.TestCase):
         task["runs"][0]["worker_id"] = None
         self.assert_invalid(task, "active run requires worker_id")
 
+    def test_provisioning_run_allows_bounded_workerless_state(self) -> None:
+        task = self.worker_task()
+        run = task["runs"][0]
+        run["status"] = "provisioning"
+        run["worker_id"] = None
+        run["attempts"][0]["status"] = "provisioning"
+        run["attempts"][0]["lease"] = None
+        run["provisioning"] = {
+            "transaction_id": "create-SPEC-101-a01",
+            "status": "pending",
+            "started_at": NOW,
+            "deadline_at": "2026-07-13T12:02:00Z",
+            "finished_at": None,
+            "failure": None,
+        }
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_expired_provisioning_requires_rollback(self) -> None:
+        task = self.worker_task()
+        run = task["runs"][0]
+        run["status"] = "provisioning"
+        run["worker_id"] = None
+        run["attempts"][0]["status"] = "provisioning"
+        run["attempts"][0]["lease"] = None
+        run["provisioning"] = {
+            "transaction_id": "create-SPEC-101-a01",
+            "status": "pending",
+            "started_at": "2026-07-13T11:55:00Z",
+            "deadline_at": "2026-07-13T11:57:00Z",
+            "finished_at": None,
+            "failure": None,
+        }
+        self.assert_invalid(task, "roll it back")
+
     def test_duplicate_attempt_id_is_rejected(self) -> None:
         task = self.worker_task()
         task["runs"][0]["attempts"].append(copy.deepcopy(task["runs"][0]["attempts"][0]))
@@ -662,6 +825,35 @@ class ValidatorCase(unittest.TestCase):
         task = self.worker_task()
         task["dispatch"]["worker_reuse"]["reuse_across_gates"] = False
         self.assert_invalid(task, "requires sticky reuse across gates")
+
+    def test_thin_wrapper_subagent_contract_passes(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["delegation"] = thin_wrapper_delegation()
+        result = self.run_task(task)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_thin_wrapper_requires_single_visible_codex_worker(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["delegation"] = thin_wrapper_delegation()
+        task["dispatch"]["strategy"] = "full-dispatch"
+        self.assert_invalid(task, "delegated subagent execution requires dispatch.strategy=single-worker")
+
+    def test_thin_wrapper_requires_one_parallel_worker(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["delegation"] = thin_wrapper_delegation()
+        task["dispatch"]["max_parallel_workers"] = 2
+        self.assert_invalid(task, "delegated subagent execution requires max_parallel_workers=1")
+
+    def test_thin_wrapper_requires_shell_capability(self) -> None:
+        task = self.worker_task()
+        task["dispatch"]["delegation"] = thin_wrapper_delegation()
+        task["dispatch"]["required_capabilities"].remove("shell")
+        self.assert_invalid(task, "delegated subagent wrapper lacks required capabilities: shell")
+
+    def test_direct_strategy_rejects_subagent_delegation(self) -> None:
+        task = base_task()
+        task["dispatch"]["delegation"] = thin_wrapper_delegation()
+        self.assert_invalid(task, "dispatch.strategy=direct requires delegation=null or omitted")
 
     def test_single_worker_reuses_same_worker_across_runs(self) -> None:
         task = self.worker_task()
@@ -957,6 +1149,193 @@ class ValidatorCase(unittest.TestCase):
         task = self.worker_task()
         task["dispatch"]["heartbeat"]["status"] = "paused"
         self.assert_invalid(task, "active runs require heartbeat.status=active")
+
+    def test_codex_run_rejects_second_terminal_wait_authorization(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        events = [
+            wait_event("snapshot-001", "status-observed", NOW),
+            wait_event(
+                "wait-auth-001",
+                "terminal-wait-authorized",
+                "2026-07-13T12:01:00Z",
+            ),
+            wait_event(
+                "wait-auth-002",
+                "terminal-wait-authorized",
+                "2026-07-13T12:02:00Z",
+            ),
+        ]
+        result = self.run_task(task, runtime=runtime, runtime_events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("consumed 2 terminal waits", result.stderr)
+
+    def test_heartbeat_cannot_authorize_positive_terminal_wait(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        events = [
+            wait_event("snapshot-001", "status-observed", NOW),
+            wait_event(
+                "wait-auth-001",
+                "terminal-wait-authorized",
+                "2026-07-13T12:01:00Z",
+                source="heartbeat",
+            ),
+        ]
+        result = self.run_task(task, runtime=runtime, runtime_events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot originate from Heartbeat", result.stderr)
+
+    def test_codex_session_audit_rejects_unpermitted_native_wait(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[wait_event("snapshot-001", "status-observed", NOW)],
+            codex_session_records=[
+                native_wait_record("native-wait-001", "2026-07-13T12:01:00Z")
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("unpermitted positive wait_threads", result.stderr)
+
+    def test_codex_session_audit_accepts_one_authorized_native_wait(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[
+                wait_event("snapshot-001", "status-observed", NOW),
+                wait_event(
+                    "wait-auth-001",
+                    "terminal-wait-authorized",
+                    "2026-07-13T12:00:30Z",
+                ),
+            ],
+            codex_session_records=[
+                native_wait_record("native-wait-001", "2026-07-13T12:01:00Z")
+            ],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_codex_session_audit_rejects_unpermitted_zero_wait(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[],
+            codex_session_records=[
+                native_wait_record(
+                    "native-inspect-001", "2026-07-13T12:01:00Z", timeout_ms=0
+                )
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("unpermitted zero-wait", result.stderr)
+
+    def test_codex_session_audit_accepts_authorized_zero_wait(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[
+                wait_event(
+                    "inspect-auth-001",
+                    "status-inspect-authorized",
+                    "2026-07-13T12:00:30Z",
+                )
+            ],
+            codex_session_records=[
+                native_wait_record(
+                    "native-inspect-001", "2026-07-13T12:01:00Z", timeout_ms=0
+                )
+            ],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_validator_rejects_scheduled_inspections_inside_debounce(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[
+                wait_event(
+                    "inspect-auth-001",
+                    "status-inspect-authorized",
+                    "2026-07-13T12:00:00Z",
+                ),
+                wait_event(
+                    "inspect-auth-002",
+                    "status-inspect-authorized",
+                    "2026-07-13T12:05:00Z",
+                ),
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("less than 600 seconds", result.stderr)
+
+    def test_validator_debounces_scheduled_inspection_after_post_create(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        created = wait_event(
+            "inspect-auth-created",
+            "status-inspect-authorized",
+            "2026-07-13T12:00:00Z",
+        )
+        created["payload"]["reason"] = "post-create"
+        scheduled = wait_event(
+            "inspect-auth-scheduled",
+            "status-inspect-authorized",
+            "2026-07-13T12:05:00Z",
+        )
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[created, scheduled],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("less than 600 seconds", result.stderr)
+
+    def test_codex_session_audit_does_not_reuse_pre_policy_authorization(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[
+                wait_event(
+                    "wait-auth-old",
+                    "terminal-wait-authorized",
+                    "2026-07-13T11:59:00Z",
+                ),
+                wait_event("snapshot-001", "status-observed", NOW),
+            ],
+            codex_session_records=[
+                native_wait_record("native-wait-001", "2026-07-13T12:01:00Z")
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("unpermitted positive wait_threads", result.stderr)
+
+    def test_terminal_wait_completion_must_match_authorization(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        completion = wait_event(
+            "wait-finished-001",
+            "terminal-wait-finished",
+            "2026-07-13T12:01:30Z",
+        )
+        completion["worker_id"] = "codex-thread:wrong-worker"
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[
+                wait_event("snapshot-001", "status-observed", NOW),
+                wait_event(
+                    "wait-auth-001",
+                    "terminal-wait-authorized",
+                    "2026-07-13T12:01:00Z",
+                ),
+                completion,
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("must match authorization", result.stderr)
 
     def test_heartbeat_cannot_remain_active_without_active_run(self) -> None:
         task = self.worker_task()

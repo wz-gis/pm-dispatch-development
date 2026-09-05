@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import json
 import os
 import sys
@@ -36,6 +37,65 @@ def isoformat(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def observe_progress(
+    run: dict[str, Any], lease: dict[str, Any], probe_status: str, now: datetime,
+    *, command_id: str | None, command_deadline: str | None, stale_after_seconds: int,
+) -> str | None:
+    previous = run.get("observation") or {}
+    seq = int(lease.get("progress_seq") or 0)
+    progress_at = (lease.get("last_progress_at") or run.get("started_at") or lease.get("acquired_at")
+                   or previous.get("last_progress_at") or isoformat(now))
+    previous_at = previous.get("last_progress_at")
+    progressed = seq > int(previous.get("progress_seq") or 0) or bool(
+        progress_at and previous_at and parse_time(progress_at) > parse_time(previous_at)
+    )
+    if previous.get("observed_at") and now < parse_time(previous["observed_at"]):
+        raise LivenessError("probe is older than the last observation")
+    if seq < int(previous.get("progress_seq") or 0):
+        raise LivenessError("progress_seq must not move backwards")
+    observation = {
+        "provider_status": probe_status, "observed_at": isoformat(now),
+        "progress_seq": seq, "last_progress_at": progress_at,
+        "state": "active", "reason": None, "attention_at": None,
+        "command_id": None, "command_deadline": None,
+    }
+    if not progressed:
+        for key in ("state", "reason", "attention_at", "command_id", "command_deadline"):
+            observation[key] = previous.get(key, observation[key])
+    if bool(command_id) != bool(command_deadline):
+        raise LivenessError("a verified running command requires both command-id and command-deadline")
+    if command_id:
+        deadline = parse_time(command_deadline)
+        if not progressed and previous.get("command_id"):
+            if command_id != previous["command_id"] or deadline != parse_time(previous["command_deadline"]):
+                raise LivenessError("a command deadline cannot be extended without a new milestone")
+        elif deadline <= now:
+            raise LivenessError("new command deadline must be in the future")
+        observation["command_id"] = command_id
+        observation["command_deadline"] = isoformat(deadline)
+        if observation["reason"] == "no-progress" and not previous.get("command_id") and deadline > now:
+            observation.update(state="waiting-command", reason=None, attention_at=None)
+    reason = None
+    if probe_status in {"idle", "interrupted"}:
+        reason = "interrupted" if probe_status == "interrupted" else "idle-without-outcome"
+    elif observation["attention_at"]:
+        reason = observation["reason"]
+    elif observation["command_deadline"] and now < parse_time(observation["command_deadline"]):
+        observation["state"] = "waiting-command"
+    elif progress_at and (now - parse_time(progress_at)).total_seconds() >= stale_after_seconds:
+        reason = "no-progress"
+    else:
+        observation["state"] = "active"
+    outcome = None
+    if reason:
+        first = not observation["attention_at"]
+        observation.update(state="attention", reason=reason,
+                           attention_at=observation["attention_at"] or isoformat(now))
+        outcome = "diagnosis-required" if first else "awaiting-diagnosis"
+    run["observation"] = observation
+    return outcome
+
+
 def reconcile_liveness(
     source: dict[str, Any],
     run_id: str,
@@ -43,13 +103,22 @@ def reconcile_liveness(
     now: datetime,
     lease_minutes: int = 30,
     grace_seconds: int = 60,
+    *,
+    latest_turn_status: str | None = None,
+    command_id: str | None = None,
+    command_deadline: str | None = None,
+    stale_after_seconds: int = 1800,
 ) -> tuple[dict[str, Any], str]:
     task = copy.deepcopy(source)
     run = next((item for item in task.get("runs", []) if item.get("run_id") == run_id), None)
     if not run:
         raise LivenessError(f"unknown run_id {run_id!r}")
     if run.get("status") not in ACTIVE:
+        if run.get("status") in TERMINAL and probe_status in {run["status"], "idle"}:
+            return task, "terminal-already-reconciled"
         raise LivenessError(f"run {run_id!r} is not active")
+    if lease_minutes < 1 or grace_seconds < 1 or stale_after_seconds < 600:
+        raise LivenessError("lease/grace must be positive; no-progress window must be at least one 600s tick")
 
     attempts = [item for item in run.get("attempts", []) if item.get("status") in ACTIVE]
     if len(attempts) != 1:
@@ -60,7 +129,12 @@ def reconcile_liveness(
         raise LivenessError(f"run {run_id!r} has no Lease")
 
     now_text = isoformat(now)
-    if probe_status == "running":
+    if probe_status == "idle" and latest_turn_status == "interrupted":
+        probe_status = "interrupted"
+    if probe_status in {"running", "queued", "idle", "interrupted"}:
+        # Idle is not a successful delegation, nor proof that subprocesses stopped.
+        run["status"] = "running" if probe_status == "running" else "queued"
+        attempt["status"] = run["status"]
         lease["heartbeat_at"] = now_text
         lease["expires_at"] = isoformat(now + timedelta(minutes=lease_minutes))
         lease["renew_count"] = int(lease.get("renew_count") or 0) + 1
@@ -69,7 +143,10 @@ def reconcile_liveness(
         lease["disconnect_probe_count"] = 0
         lease["disconnect_first_seen_at"] = None
         sync_active_locks(task, run_id, lease["expires_at"])
-        outcome = "renewed-same-attempt"
+        outcome = observe_progress(
+            run, lease, probe_status, now, command_id=command_id,
+            command_deadline=command_deadline, stale_after_seconds=stale_after_seconds,
+        ) or "renewed-same-attempt"
     elif probe_status in TERMINAL:
         run["status"] = probe_status
         run["finished_at"] = now_text
@@ -142,6 +219,9 @@ def main() -> int:
         required=True,
         choices=[
             "running",
+            "queued",
+            "idle",
+            "interrupted",
             "succeeded",
             "failed",
             "blocked",
@@ -153,6 +233,10 @@ def main() -> int:
     parser.add_argument("--now", help="Probe time in ISO-8601; defaults to current UTC")
     parser.add_argument("--lease-minutes", type=int, default=30)
     parser.add_argument("--grace-seconds", type=int, default=60)
+    parser.add_argument("--latest-turn-status", choices=["running", "completed", "failed", "interrupted"])
+    parser.add_argument("--command-id", help="ID of a verified running build/test process")
+    parser.add_argument("--command-deadline", help="Fixed expected completion deadline; never slide it each tick")
+    parser.add_argument("--stale-after-seconds", type=int, default=1800)
     parser.add_argument("--write", action="store_true")
     args = parser.parse_args()
     if args.lease_minutes < 1 or args.grace_seconds < 1:
@@ -168,16 +252,17 @@ def main() -> int:
         path = runtime_path
         source = load_structured_file(runtime_path)
     now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
-    task, outcome = reconcile_liveness(
-        source,
-        args.run_id,
-        args.probe_status,
-        now,
-        args.lease_minutes,
-        args.grace_seconds,
-    )
-    if args.write:
-        atomic_write(path, task)
+    # Lock a stable sidecar, not the inode replaced by atomic_write.
+    with path.with_name(path.name + ".liveness.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX if args.write else fcntl.LOCK_SH)
+        source = load_structured_file(path)
+        task, outcome = reconcile_liveness(
+            source, args.run_id, args.probe_status, now, args.lease_minutes, args.grace_seconds,
+            latest_turn_status=args.latest_turn_status, command_id=args.command_id,
+            command_deadline=args.command_deadline, stale_after_seconds=args.stale_after_seconds,
+        )
+        if args.write:
+            atomic_write(path, task)
     print(json.dumps({"outcome": outcome, "task": task}, ensure_ascii=False, indent=2))
     return 0
 

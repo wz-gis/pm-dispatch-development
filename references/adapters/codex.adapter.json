@@ -1,12 +1,14 @@
 {
   "schema_version": "3",
   "protocol_version": "2",
-  "adapter_version": "9",
+  "adapter_version": "13",
   "provider": "codex",
   "status_map": [
     {"provider_status": "created", "core_status": "queued"},
     {"provider_status": "queued", "core_status": "queued"},
     {"provider_status": "pending", "core_status": "queued"},
+    {"provider_status": "idle", "core_status": "queued"},
+    {"provider_status": "interrupted", "core_status": "queued"},
     {"provider_status": "running", "core_status": "running"},
     {"provider_status": "in_progress", "core_status": "running"},
     {"provider_status": "completed", "core_status": "succeeded"},
@@ -35,6 +37,7 @@
   "components": {
     "worker": {
       "transport": "tool",
+      "visibility": "user-visible",
       "create": {
         "target": "create_thread",
         "input_fields": ["title", "prompt"],
@@ -52,19 +55,25 @@
         "idempotency": "required"
       },
       "inspect": {
-        "target": "read_thread",
+        "target": "wait_threads",
         "input_fields": ["worker_id"],
-        "optional_input_fields": [],
+        "optional_input_fields": ["event_cursor"],
+        "fixed_inputs": {"timeout_ms": 0},
         "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": null},
         "timeout_seconds": 30,
         "idempotency": "none"
       },
       "wait": {
         "target": "wait_threads",
-        "input_fields": ["worker_id"],
-        "optional_input_fields": ["event_cursor", "timeout_ms"],
+        "input_fields": ["worker_id", "timeout_ms"],
+        "optional_input_fields": ["event_cursor"],
+        "call_policy": {
+          "max_calls_per_run": 1,
+          "max_timeout_ms": 30000,
+          "allowed_sources": ["coordinator"]
+        },
         "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": "$"},
-        "timeout_seconds": 120,
+        "timeout_seconds": 30,
         "idempotency": "none"
       },
       "rebind": {
@@ -104,9 +113,14 @@
     "monitor": {
       "modes": ["heartbeat", "event-lease", "manual"],
       "supports_lease_renewal": true,
+      "heartbeat_operation": "automation_update",
       "heartbeat_target": "coordinator-thread",
+      "coordinator_binding": "current-conversation",
       "event_wait_target": "wait_threads",
-      "disconnect_probe_operation": "inspect"
+      "disconnect_probe_operation": "inspect",
+      "inspection_interval_seconds": 600,
+      "max_inspections_per_cycle": 1,
+      "model_free_tick": "scripts/plan_monitor_tick.py"
     },
     "evidence": {
       "artifact_kinds": [

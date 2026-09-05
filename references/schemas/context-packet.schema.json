@@ -30,6 +30,8 @@
     "schema_version": {"type": "string", "enum": ["1"]},
     "derived": {"type": "boolean", "enum": [true]},
     "mode": {"type": "string", "enum": ["initial", "continuation"]},
+    "purpose": {"type": "string", "enum": ["execute", "inspect"]},
+    "recovery_attempt": {"type": ["string", "null"], "minLength": 1},
     "task": {
       "type": "object",
       "additionalProperties": false,
@@ -47,7 +49,7 @@
     "execution": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_id", "run_status", "attempt_id", "attempt_status", "gate", "design_fingerprint", "latest_milestone"],
+      "required": ["run_id", "run_status", "attempt_id", "attempt_status", "gate", "design_fingerprint", "delegation", "latest_milestone"],
       "properties": {
         "run_id": {"type": ["string", "null"]},
         "run_status": {"type": ["string", "null"]},
@@ -55,10 +57,22 @@
         "attempt_status": {"type": ["string", "null"]},
         "gate": {"type": ["string", "null"], "enum": ["contract", "implementation", "integration", "verification", "closure", null]},
         "design_fingerprint": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "delegation": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["mode", "agent", "initial_invocation_limit", "repair_invocation_limit", "retry_policy"],
+          "properties": {
+            "mode": {"type": "string", "enum": ["thin-wrapper-subagent"]},
+            "agent": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+            "initial_invocation_limit": {"type": "integer", "enum": [1]},
+            "repair_invocation_limit": {"type": "integer", "enum": [1]},
+            "retry_policy": {"type": "string", "enum": ["focused-verification-failure-only"]}
+          }
+        },
         "latest_milestone": {
           "type": ["object", "null"],
           "additionalProperties": false,
-          "required": ["progress_seq", "last_progress_at", "summary", "event_cursor"],
+          "required": ["progress_seq", "last_progress_at", "summary"],
           "properties": {
             "progress_seq": {"type": "integer", "minimum": 0},
             "last_progress_at": {"type": ["string", "null"], "format": "date-time"},
@@ -142,7 +156,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["resource_id", "mode", "status", "holder_run_id", "lease_expires_at", "scope"],
+        "required": ["resource_id", "mode", "status", "holder_run_id", "scope"],
         "properties": {
           "resource_id": {"type": "string", "minLength": 1},
           "mode": {"type": "string", "enum": ["shared", "exclusive"]},
@@ -221,11 +235,11 @@
       "required": ["task", "runtime", "evidence", "evidence_digest", "project_snapshot", "recovery_ledger"],
       "properties": {
         "task": {"$ref": "#/$defs/source_digest"},
-        "runtime": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
-        "evidence": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
-        "evidence_digest": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
-        "project_snapshot": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}},
-        "recovery_ledger": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}
+        "runtime": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256", "digest_kind"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "digest_kind": {"type": "string", "enum": ["runtime-context-v1"]}}},
+        "evidence": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256", "digest_kind"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "digest_kind": {"type": "string", "enum": ["raw-file-v1"]}}},
+        "evidence_digest": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256", "digest_kind"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "digest_kind": {"type": "string", "enum": ["evidence-digest-v1"]}}},
+        "project_snapshot": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256", "digest_kind"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "digest_kind": {"type": "string", "enum": ["project-snapshot-v1"]}}},
+        "recovery_ledger": {"type": ["object", "null"], "additionalProperties": false, "required": ["path", "sha256", "digest_kind"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "digest_kind": {"type": "string", "enum": ["raw-file-v1"]}}}
       }
     },
     "generated_at": {"type": "string", "format": "date-time"},
@@ -235,10 +249,11 @@
     "source_digest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
+      "required": ["path", "sha256", "digest_kind"],
       "properties": {
         "path": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "digest_kind": {"type": "string", "enum": ["raw-file-v1"]}
       }
     }
   }

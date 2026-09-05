@@ -15,13 +15,34 @@ import json
 import re
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-ACTIVE_RUN_STATUSES = {"queued", "running"}
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from wait_policy import (  # noqa: E402
+    CODEX_WAIT_MAX_CALLS_PER_RUN,
+    CODEX_WAIT_MAX_TIMEOUT_MS,
+    CODEX_WAIT_POLICY_NAME,
+    codex_wait_policy_applies,
+)
+from monitor_policy import (  # noqa: E402
+    CODEX_INSPECTION_POLICY_ADAPTER_VERSION,
+    INSPECTION_MAX_CALLS_PER_CYCLE,
+    INSPECTION_MIN_INTERVAL_SECONDS,
+    INSPECTION_POLICY_NAME,
+    PROVISIONING_MAX_TTL_SECONDS,
+    inspection_policy_applies,
+)
+
+
+ACTIVE_RUN_STATUSES = {"provisioning", "queued", "running"}
+EXECUTING_RUN_STATUSES = {"queued", "running"}
 ACTIVE_LOCK_STATUSES = {"active"}
 HEARTBEAT_PROMPT_MAX_CHARS = 240
 COORDINATOR_HEARTBEAT_INTERVAL_MINUTES = 10
@@ -128,6 +149,7 @@ class LoadedTask:
     evidence: dict[str, Any] | None
     runtime_path: Path | None = None
     runtime: dict[str, Any] | None = None
+    runtime_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 def main() -> int:
@@ -142,6 +164,10 @@ def main() -> int:
         "--automation-dir",
         help="Optional Codex automations directory used to verify Heartbeat schedule/status drift",
     )
+    parser.add_argument(
+        "--codex-session-dir",
+        help="Optional Codex sessions directory used to audit native wait_threads calls",
+    )
     parser.add_argument("--now", help="Override current time, ISO-8601. Defaults to current UTC time")
     args = parser.parse_args()
 
@@ -152,6 +178,9 @@ def main() -> int:
     schema_dir = Path(args.schema_dir).resolve() if args.schema_dir else script_dir.parent / "references" / "schemas"
     adapter_dir = Path(args.adapter_dir).resolve() if args.adapter_dir else script_dir.parent / "references" / "adapters"
     automation_dir = Path(args.automation_dir).resolve() if args.automation_dir else None
+    codex_session_dir = (
+        Path(args.codex_session_dir).resolve() if args.codex_session_dir else None
+    )
     task_schema = load_structured_file(schema_dir / "task.schema.json")
     evidence_schema = load_structured_file(schema_dir / "evidence.schema.json")
     runtime_schema = load_structured_file(schema_dir / "runtime.schema.json")
@@ -184,6 +213,7 @@ def main() -> int:
 
         runtime_path = None
         runtime = None
+        runtime_events: list[dict[str, Any]] = []
         layout_errors: list[str] = []
         if task.get("schema_version") == "4":
             runtime_path = runtime_file_for(
@@ -203,7 +233,7 @@ def main() -> int:
                     if runtime_errors:
                         runtime = None
                     else:
-                        event_errors = validate_runtime_event_log(
+                        runtime_events, event_errors = load_runtime_event_log(
                             runtime_path, runtime, runtime_event_schema
                         )
                         errors.extend(event_errors)
@@ -231,11 +261,20 @@ def main() -> int:
         elif task.get("status") in EVIDENCE_REQUIRED_STATUSES:
             errors.append(f"{task_path}: status {task.get('status')} requires evidence file {evidence_path}")
 
-        loaded.append(LoadedTask(task_path, effective_task, evidence, runtime_path, runtime))
+        loaded.append(
+            LoadedTask(
+                task_path,
+                effective_task,
+                evidence,
+                runtime_path,
+                runtime,
+                runtime_events,
+            )
+        )
 
     for item in loaded:
         item_errors, item_warnings = validate_gate_policy(
-            item, now, adapters, automation_dir
+            item, now, adapters, automation_dir, codex_session_dir
         )
         errors.extend(item_errors)
         warnings.extend(item_warnings)
@@ -334,21 +373,22 @@ def compose_task_runtime(
     return effective
 
 
-def validate_runtime_event_log(
+def load_runtime_event_log(
     runtime_path: Path,
     runtime: dict[str, Any],
     event_schema: dict[str, Any],
-) -> list[str]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     configured = runtime.get("event_log_file")
     if not configured:
-        return [f"{runtime_path}: Runtime requires event_log_file"]
+        return [], [f"{runtime_path}: Runtime requires event_log_file"]
     event_path = Path(str(configured))
     if not event_path.is_absolute():
         event_path = (runtime_path.parent / event_path).resolve()
     if not event_path.exists():
-        return [f"{runtime_path}: event log does not exist: {event_path}"]
+        return [], [f"{runtime_path}: event log does not exist: {event_path}"]
 
     errors: list[str] = []
+    events: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     previous_time: datetime | None = None
     for lineno, raw_line in enumerate(event_path.read_text(encoding="utf-8").splitlines(), 1):
@@ -359,9 +399,12 @@ def validate_runtime_event_log(
         except json.JSONDecodeError as exc:
             errors.append(f"{event_path}:{lineno}: invalid JSON event: {exc}")
             continue
-        errors.extend(
-            validate_schema(event, event_schema, f"{event_path}:{lineno}", event_schema)
+        schema_errors = validate_schema(
+            event, event_schema, f"{event_path}:{lineno}", event_schema
         )
+        errors.extend(schema_errors)
+        if not schema_errors:
+            events.append(event)
         event_id = event.get("event_id")
         if event_id in seen_ids:
             errors.append(f"{event_path}:{lineno}: duplicate event_id {event_id!r}")
@@ -377,7 +420,41 @@ def validate_runtime_event_log(
         if previous_time and occurred_at < previous_time:
             errors.append(f"{event_path}:{lineno}: events must be time ordered")
         previous_time = occurred_at
-    return errors
+    return events, errors
+
+
+def validate_runtime_event_log(
+    runtime_path: Path,
+    runtime: dict[str, Any],
+    event_schema: dict[str, Any],
+) -> list[str]:
+    return load_runtime_event_log(runtime_path, runtime, event_schema)[1]
+
+
+def validate_recovery_state(item: LoadedTask) -> list[str]:
+    from manage_recovery_ledger import default_path, execution_error, validate_ledger
+
+    path = default_path(item.path)
+    if not path.is_file():
+        return []  # Legacy records remain readable; preflight creates the canonical ledger.
+    try:
+        ledger = load_structured_file(path)
+        errors = validate_ledger(ledger, path, Path(__file__).resolve().parent.parent / "references" / "schemas")
+        if ledger.get("task_id") != item.task.get("id"):
+            errors.append(f"{path}: Recovery Ledger task_id does not match Task")
+        if errors:
+            return errors
+        for run in item.task.get("runs", []):
+            if run.get("status") not in ACTIVE_RUN_STATUSES:
+                continue
+            entry = next((gate for gate in ledger["gates"] if gate["gate"] == run.get("gate")), {})
+            pending = next((row["attempt_key"] for row in entry.get("attempts", []) if row["result"] == "pending"), None)
+            error = execution_error(ledger, run.get("gate"), pending)
+            if error:
+                errors.append(f"{path}: active Run {run.get('run_id')}: {error}")
+        return errors
+    except (OSError, ValueError) as exc:
+        return [f"{path}: invalid Recovery Ledger: {exc}"]
 
 
 def validate_gate_policy(
@@ -385,12 +462,25 @@ def validate_gate_policy(
     now: datetime,
     adapters: dict[str, dict[str, Any]],
     automation_dir: Path | None = None,
+    codex_session_dir: Path | None = None,
 ) -> tuple[list[str], list[str]]:
     task = item.task
     evidence = item.evidence
     prefix = str(item.path)
     errors: list[str] = []
     warnings: list[str] = []
+    errors.extend(validate_recovery_state(item))
+    for run in task.get("runs", []):
+        observation = run.get("observation") or {}
+        if not observation:
+            continue
+        if observation.get("provider_status") in {"idle", "interrupted"} and run.get("status") == "running":
+            errors.append(f"{prefix}: idle/interrupted Worker must be reconciled, not left running")
+        attention = observation.get("state") == "attention"
+        if attention != bool(observation.get("attention_at") and observation.get("reason")):
+            errors.append(f"{prefix}: observation attention state requires a reason and timestamp")
+        if bool(observation.get("command_id")) != bool(observation.get("command_deadline")):
+            errors.append(f"{prefix}: observed command requires both ID and fixed deadline")
 
     status = task.get("status")
     open_blockers = [b for b in task.get("blockers", []) if b.get("status") == "open"]
@@ -495,7 +585,8 @@ def validate_gate_policy(
         elif worker_name and run_id != f"run-{worker_name}":
             errors.append(f"{prefix}: run_id {run_id!r} must equal run-{worker_name}")
 
-        if run.get("status") in ACTIVE_RUN_STATUSES and not worker_id:
+        run_status = run.get("status")
+        if run_status in EXECUTING_RUN_STATUSES and not worker_id:
             errors.append(f"{prefix}: active run requires worker_id: {run_id}")
         if worker_name.startswith(f"{task_id}-"):
             role = worker_gate_slug(worker_name)
@@ -526,9 +617,50 @@ def validate_gate_policy(
                 errors.append(f"{prefix}: attempt_id {attempt_id!r} must be derived from worker_name {worker_name!r}")
             if attempt.get("status") in ACTIVE_RUN_STATUSES:
                 active_attempts.append(attempt)
-        if run.get("status") in ACTIVE_RUN_STATUSES:
+        provisioning = run.get("provisioning")
+        if run_status == "provisioning":
+            if worker_id:
+                errors.append(f"{prefix}: provisioning run {run_id} cannot have worker_id")
+            if len(active_attempts) != 1 or any(
+                attempt.get("status") != "provisioning" for attempt in active_attempts
+            ):
+                errors.append(
+                    f"{prefix}: provisioning run {run_id} requires exactly one provisioning attempt"
+                )
+            if any(attempt.get("lease") is not None for attempt in active_attempts):
+                errors.append(f"{prefix}: provisioning run {run_id} cannot acquire a Lease")
+            if not isinstance(provisioning, dict) or provisioning.get("status") != "pending":
+                errors.append(
+                    f"{prefix}: provisioning run {run_id} requires provisioning.status=pending"
+                )
+            else:
+                started = parse_time(provisioning.get("started_at"))
+                deadline = parse_time(provisioning.get("deadline_at"))
+                if started >= deadline:
+                    errors.append(
+                        f"{prefix}: provisioning deadline must follow its start for {run_id}"
+                    )
+                elif (deadline - started).total_seconds() > PROVISIONING_MAX_TTL_SECONDS:
+                    errors.append(
+                        f"{prefix}: provisioning run {run_id} exceeds the "
+                        f"{PROVISIONING_MAX_TTL_SECONDS}-second deadline limit"
+                    )
+                if deadline <= now:
+                    errors.append(
+                        f"{prefix}: provisioning run {run_id} expired at "
+                        f"{provisioning.get('deadline_at')}; roll it back"
+                    )
+                if provisioning.get("finished_at") is not None:
+                    errors.append(
+                        f"{prefix}: pending provisioning {run_id} cannot have finished_at"
+                    )
+        elif run_status in EXECUTING_RUN_STATUSES:
             if len(active_attempts) != 1:
                 errors.append(f"{prefix}: active run {run_id} requires exactly one active attempt")
+            if isinstance(provisioning, dict) and provisioning.get("status") == "pending":
+                errors.append(
+                    f"{prefix}: active run {run_id} cannot retain pending provisioning"
+                )
             lease = latest_lease(run)
             if not lease:
                 errors.append(f"{prefix}: active run {run.get('run_id')} has no lease")
@@ -555,6 +687,14 @@ def validate_gate_policy(
                 errors.append(f"{prefix}: active run {run_id} lease expires before it was acquired")
         elif active_attempts:
             errors.append(f"{prefix}: terminal run {run_id} cannot contain active attempts")
+        if run_status in TERMINAL_RUN_STATUSES and isinstance(provisioning, dict):
+            if provisioning.get("status") == "pending":
+                errors.append(
+                    f"{prefix}: terminal run {run_id} cannot retain pending provisioning"
+                )
+
+    validate_codex_wait_policy(item, errors, warnings, codex_session_dir)
+    validate_codex_inspection_policy(item, errors, warnings, codex_session_dir)
 
     active_by_gate: dict[str, list[str]] = {}
     for run in task.get("runs", []):
@@ -592,6 +732,38 @@ def validate_gate_policy(
         errors.append(f"{prefix}: dispatch.strategy=direct requires heartbeat=null")
     if strategy == "direct" and dispatch.get("worker_reuse") is not None:
         errors.append(f"{prefix}: dispatch.strategy=direct requires worker_reuse=null")
+    delegation = dispatch.get("delegation")
+    if strategy == "direct" and delegation is not None:
+        errors.append(f"{prefix}: dispatch.strategy=direct requires delegation=null or omitted")
+    if delegation is not None:
+        if strategy != "single-worker":
+            errors.append(
+                f"{prefix}: delegated subagent execution requires dispatch.strategy=single-worker"
+            )
+        if provider_policy != {"mode": "pinned", "provider": "codex"}:
+            errors.append(
+                f"{prefix}: delegated subagent execution requires a pinned visible Codex Worker"
+            )
+        if dispatch.get("max_parallel_workers") != 1:
+            errors.append(
+                f"{prefix}: delegated subagent execution requires max_parallel_workers=1"
+            )
+        if dispatch.get("heartbeat_required") is not True:
+            errors.append(
+                f"{prefix}: delegated subagent execution requires coordinator heartbeat monitoring"
+            )
+        missing_wrapper_capabilities = {
+            "background-worker",
+            "code-edit",
+            "git",
+            "heartbeat",
+            "shell",
+        } - set(dispatch.get("required_capabilities") or [])
+        if missing_wrapper_capabilities:
+            errors.append(
+                f"{prefix}: delegated subagent wrapper lacks required capabilities: "
+                + ", ".join(sorted(missing_wrapper_capabilities))
+            )
     if strategy == "single-worker" and len(active_runs) > 1:
         errors.append(f"{prefix}: dispatch.strategy=single-worker allows at most one active run")
     if strategy == "single-worker":
@@ -664,6 +836,8 @@ def validate_gate_policy(
     resolved_monitor = (dispatch.get("resolution") or {}).get("monitor_mode")
     if resolved_monitor == "event-lease":
         for run in active_runs:
+            if run.get("status") == "provisioning":
+                continue
             lease = latest_lease(run) or {}
             heartbeat_at = lease.get("heartbeat_at")
             if not heartbeat_at:
@@ -734,6 +908,13 @@ def validate_gate_policy(
         coordinator_thread_id = str(heartbeat.get("coordinator_thread_id") or "")
         if not coordinator_thread_id:
             errors.append(f"{prefix}: heartbeat requires the PM coordinator_thread_id")
+        resolution = dispatch.get("resolution") or {}
+        if (
+            resolution.get("provider") == "codex"
+            and int(str(resolution.get("adapter_version") or "0")) >= 13
+            and not isinstance(heartbeat.get("coordinator_epoch"), int)
+        ):
+            errors.append(f"{prefix}: Codex v13 heartbeat requires coordinator_epoch")
         if coordinator_thread_id in worker_ids:
             errors.append(
                 f"{prefix}: heartbeat coordinator_thread_id must differ from every Worker thread"
@@ -932,12 +1113,22 @@ def validate_dependency_graph_and_locks(items: list[LoadedTask], now: datetime) 
                     f"{item.path}: active resource lock {lock.get('resource_id')} references non-active run {holder_run_id}"
                 )
                 continue
-            run_lease = latest_lease(holder_run)
-            if not run_lease or parse_time(expires) > parse_time(run_lease.get("expires_at")):
-                errors.append(
-                    f"{item.path}: resource lock {lock.get('resource_id')} outlives holder run lease"
-                )
-                continue
+            if holder_run.get("status") == "provisioning":
+                provisioning = holder_run.get("provisioning") or {}
+                deadline = provisioning.get("deadline_at")
+                if not deadline or parse_time(expires) > parse_time(deadline):
+                    errors.append(
+                        f"{item.path}: resource lock {lock.get('resource_id')} "
+                        "outlives holder provisioning deadline"
+                    )
+                    continue
+            else:
+                run_lease = latest_lease(holder_run)
+                if not run_lease or parse_time(expires) > parse_time(run_lease.get("expires_at")):
+                    errors.append(
+                        f"{item.path}: resource lock {lock.get('resource_id')} outlives holder run lease"
+                    )
+                    continue
             active_locks.setdefault(lock.get("resource_id", "unknown"), []).append((item, lock))
 
     for resource_id, locks in active_locks.items():
@@ -1004,6 +1195,17 @@ def validate_adapter_resolution(
         errors.append(f"{prefix}: resolution provider {provider!r} is not allowed by fallback_policy")
     if fallback.get("mode") == "strict" and policy_mode == "auto":
         errors.append(f"{prefix}: strict fallback requires a pinned provider")
+
+    historical_resolution = (
+        task.get("status") in EVIDENCE_REQUIRED_STATUSES
+        and not any(
+            run.get("status") in ACTIVE_RUN_STATUSES for run in task.get("runs", [])
+        )
+    )
+    if historical_resolution:
+        if resolution.get("reasoning_profile") != profile:
+            errors.append(f"{prefix}: resolution reasoning_profile differs from dispatch")
+        return
 
     if resolution.get("adapter_version") != adapter.get("adapter_version"):
         errors.append(f"{prefix}: resolution adapter_version differs from provider adapter")
@@ -1342,17 +1544,62 @@ def validate_adapter_integrity(adapter: dict[str, Any], prefix: str) -> list[str
     create_paths = create.get("result_paths") if isinstance(create, dict) else {}
     if isinstance(create_paths, dict) and not create_paths.get("worker_id"):
         errors.append(f"{prefix}: worker create operation requires result_paths.worker_id")
+    if adapter.get("provider") == "codex":
+        if worker.get("visibility") != "user-visible":
+            errors.append(f"{prefix}: Codex dispatch requires a user-visible Worker")
+        if create.get("target") != "create_thread":
+            errors.append(f"{prefix}: Codex visible Worker must be created with create_thread")
+        inspect = worker.get("inspect") or {}
+        wait = worker.get("wait") or {}
+        if (
+            inspect.get("target") != "wait_threads"
+            or inspect.get("fixed_inputs") != {"timeout_ms": 0}
+        ):
+            errors.append(
+                f"{prefix}: Codex inspect must be a zero-wait wait_threads snapshot"
+            )
+        if wait.get("target") != "wait_threads":
+            errors.append(f"{prefix}: Codex terminal wait must use wait_threads")
+        wait_required = set(wait.get("input_fields") or [])
+        wait_optional = set(wait.get("optional_input_fields") or [])
+        if "timeout_ms" not in wait_required or "timeout_ms" in wait_optional:
+            errors.append(
+                f"{prefix}: Codex terminal wait requires explicit timeout_ms"
+            )
+        expected_wait_policy = {
+            "max_calls_per_run": CODEX_WAIT_MAX_CALLS_PER_RUN,
+            "max_timeout_ms": CODEX_WAIT_MAX_TIMEOUT_MS,
+            "allowed_sources": ["coordinator"],
+        }
+        if wait.get("call_policy") != expected_wait_policy:
+            errors.append(
+                f"{prefix}: Codex terminal wait must use the single-short call policy"
+            )
+        if wait.get("timeout_seconds") != CODEX_WAIT_MAX_TIMEOUT_MS // 1000:
+            errors.append(f"{prefix}: Codex terminal wait transport timeout must be 30 seconds")
     for operation_name in operations:
         operation = worker.get(operation_name) or {}
         if not isinstance(operation, dict):
             continue
         required_inputs = set(operation.get("input_fields") or [])
         optional_inputs = set(operation.get("optional_input_fields") or [])
+        fixed_inputs = operation.get("fixed_inputs") or {}
+        if not isinstance(fixed_inputs, dict):
+            errors.append(
+                f"{prefix}: worker {operation_name}.fixed_inputs must be an object"
+            )
+            fixed_inputs = {}
         overlap = required_inputs & optional_inputs
         if overlap:
             errors.append(
                 f"{prefix}: worker {operation_name} inputs cannot be both required and optional: "
                 f"{', '.join(sorted(overlap))}"
+            )
+        fixed_overlap = (required_inputs | optional_inputs) & set(fixed_inputs)
+        if fixed_overlap:
+            errors.append(
+                f"{prefix}: worker {operation_name} fixed inputs cannot be caller inputs: "
+                f"{', '.join(sorted(fixed_overlap))}"
             )
         for path_field, value in (operation.get("result_paths") or {}).items():
             if value is not None and value != "$" and not str(value).startswith("$."):
@@ -1374,10 +1621,33 @@ def validate_adapter_integrity(adapter: dict[str, Any], prefix: str) -> list[str
         )
     monitor = adapter.get("components", {}).get("monitor", {})
     if "heartbeat" in set(monitor.get("modes") or []):
+        if adapter.get("provider") == "codex" and monitor.get("heartbeat_operation") != "automation_update":
+            errors.append(
+                f"{prefix}: Codex heartbeat must be created with automation_update"
+            )
         if monitor.get("heartbeat_target") != "coordinator-thread":
             errors.append(
                 f"{prefix}: heartbeat monitor requires heartbeat_target=coordinator-thread"
             )
+        if adapter.get("provider") == "codex" and monitor.get("coordinator_binding") != "current-conversation":
+            errors.append(
+                f"{prefix}: Codex heartbeat must bind to the current PM conversation"
+            )
+        if adapter.get("provider") == "codex" and int(
+            str(adapter.get("adapter_version") or "0")
+        ) >= CODEX_INSPECTION_POLICY_ADAPTER_VERSION:
+            if monitor.get("inspection_interval_seconds") != INSPECTION_MIN_INTERVAL_SECONDS:
+                errors.append(
+                    f"{prefix}: Codex incremental inspection interval must equal 600 seconds"
+                )
+            if monitor.get("max_inspections_per_cycle") != INSPECTION_MAX_CALLS_PER_CYCLE:
+                errors.append(
+                    f"{prefix}: Codex incremental inspection allows one call per cycle"
+                )
+            if monitor.get("model_free_tick") != "scripts/plan_monitor_tick.py":
+                errors.append(
+                    f"{prefix}: Codex monitor must expose the model-free tick planner"
+                )
     if "event-lease" in set(monitor.get("modes") or []):
         if not monitor.get("supports_lease_renewal"):
             errors.append(f"{prefix}: event-lease monitor requires supports_lease_renewal=true")
@@ -1398,6 +1668,484 @@ def latest_lease(run: dict[str, Any]) -> dict[str, Any] | None:
         lease = attempt.get("lease")
         if lease:
             return lease
+    return None
+
+
+def validate_codex_inspection_policy(
+    item: LoadedTask,
+    errors: list[str],
+    warnings: list[str],
+    codex_session_dir: Path | None,
+) -> None:
+    prefix = str(item.path)
+    authorizations = [
+        event
+        for event in item.runtime_events
+        if event.get("event_type") == "status-inspect-authorized"
+    ]
+    runs_by_worker: dict[str, dict[str, Any]] = {}
+    authorizations_by_run: dict[str, list[dict[str, Any]]] = {}
+    for run in item.task.get("runs", []):
+        if not inspection_policy_applies(run):
+            continue
+        run_id = str(run.get("run_id") or "")
+        budget = run.get("inspection_budget")
+        if not isinstance(budget, dict):
+            errors.append(f"{prefix}: Codex v13 run {run_id} requires inspection_budget")
+            continue
+        if budget.get("policy") != INSPECTION_POLICY_NAME:
+            errors.append(
+                f"{prefix}: run {run_id} inspection_budget.policy must be incremental-debounce"
+            )
+        if budget.get("min_interval_seconds") != INSPECTION_MIN_INTERVAL_SECONDS:
+            errors.append(
+                f"{prefix}: run {run_id} inspection interval must equal 600 seconds"
+            )
+        if budget.get("max_calls_per_cycle") != INSPECTION_MAX_CALLS_PER_CYCLE:
+            errors.append(
+                f"{prefix}: run {run_id} inspection max_calls_per_cycle must equal 1"
+            )
+        try:
+            enforced_at = parse_time(budget.get("enforced_at"))
+        except ValueError:
+            continue
+        run_events = sorted(
+            [
+                event
+                for event in authorizations
+                if event.get("run_id") == run_id
+                and parse_time(event.get("occurred_at")) >= enforced_at
+            ],
+            key=lambda event: parse_time(event.get("occurred_at")),
+        )
+        authorizations_by_run[run_id] = run_events
+        seen_cycles: set[str] = set()
+        previous_authorization: datetime | None = None
+        for event in run_events:
+            payload = event.get("payload") or {}
+            cycle_id = str(payload.get("cycle_id") or "")
+            source = payload.get("source")
+            reason = payload.get("reason")
+            occurred = parse_time(event.get("occurred_at"))
+            if not cycle_id:
+                errors.append(
+                    f"{prefix}: status inspection {event.get('event_id')} requires cycle_id"
+                )
+            elif cycle_id in seen_cycles:
+                errors.append(
+                    f"{prefix}: run {run_id} inspection cycle {cycle_id!r} was consumed twice"
+                )
+            seen_cycles.add(cycle_id)
+            if source not in {"coordinator", "heartbeat"}:
+                errors.append(
+                    f"{prefix}: status inspection {event.get('event_id')} has invalid source"
+                )
+            if reason not in {
+                "post-create",
+                "post-send",
+                "scheduled",
+                "user-request",
+                "lease-risk",
+            }:
+                errors.append(
+                    f"{prefix}: status inspection {event.get('event_id')} has invalid reason"
+                )
+            if source == "heartbeat" and reason not in {"scheduled", "lease-risk"}:
+                errors.append(
+                    f"{prefix}: Heartbeat inspection must be scheduled or lease-risk"
+                )
+            if payload.get("timeout_ms") != 0:
+                errors.append(f"{prefix}: status inspection authorization must use timeout_ms=0")
+            if event.get("provider") != "codex" or event.get("worker_id") != run.get("worker_id"):
+                errors.append(
+                    f"{prefix}: status inspection must match run {run_id} Codex Worker"
+                )
+            if reason == "scheduled":
+                if previous_authorization and (
+                    occurred - previous_authorization
+                ).total_seconds() < INSPECTION_MIN_INTERVAL_SECONDS:
+                    errors.append(
+                        f"{prefix}: run {run_id} scheduled inspections are less than 600 seconds apart"
+                    )
+            previous_authorization = occurred
+        worker_id = str(run.get("worker_id") or "")
+        if worker_id:
+            runs_by_worker[worker_id] = run
+            runs_by_worker[codex_thread_id(worker_id)] = run
+
+    if codex_session_dir and runs_by_worker:
+        validate_codex_inspection_session_audit(
+            item,
+            codex_session_dir,
+            runs_by_worker,
+            authorizations_by_run,
+            errors,
+            warnings,
+        )
+
+
+def validate_codex_inspection_session_audit(
+    item: LoadedTask,
+    session_dir: Path,
+    runs_by_worker: dict[str, dict[str, Any]],
+    authorizations_by_run: dict[str, list[dict[str, Any]]],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    prefix = str(item.path)
+    heartbeat = item.task.get("dispatch", {}).get("heartbeat") or {}
+    coordinator_id = str(heartbeat.get("coordinator_thread_id") or "")
+    if not coordinator_id:
+        return
+    if session_dir.is_file():
+        session_files = [session_dir]
+    elif session_dir.exists():
+        session_files = sorted(
+            session_dir.rglob(f"*{codex_thread_id(coordinator_id)}*.jsonl")
+        )
+    else:
+        session_files = []
+    if not session_files:
+        warnings.append(
+            f"{prefix}: no Codex session log found for inspection audit of {coordinator_id!r}"
+        )
+        return
+    calls: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in session_files:
+        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "wait_threads" not in raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            parsed = codex_wait_call_from_session_record(record, path, lineno)
+            if parsed is None:
+                continue
+            call_id, arguments = parsed
+            if call_id in seen or arguments.get("timeoutMs") != 0:
+                continue
+            seen.add(call_id)
+            try:
+                occurred_at = parse_time(record.get("timestamp"))
+            except ValueError:
+                continue
+            for target in arguments.get("targets") or []:
+                worker_id = str(target.get("threadId") or "")
+                run = runs_by_worker.get(worker_id) or runs_by_worker.get(
+                    codex_thread_id(worker_id)
+                )
+                if not run:
+                    continue
+                budget = run.get("inspection_budget") or {}
+                try:
+                    enforced_at = parse_time(budget.get("enforced_at"))
+                except ValueError:
+                    continue
+                if occurred_at >= enforced_at:
+                    calls.append(
+                        {
+                            "call_id": call_id,
+                            "run_id": run.get("run_id"),
+                            "worker_id": run.get("worker_id"),
+                            "occurred_at": occurred_at,
+                        }
+                    )
+    used: set[str] = set()
+    for call in sorted(calls, key=lambda value: value["occurred_at"]):
+        match = next(
+            (
+                event
+                for event in authorizations_by_run.get(str(call["run_id"]), [])
+                if str(event.get("event_id")) not in used
+                and event.get("worker_id") == call["worker_id"]
+                and parse_time(event.get("occurred_at")) <= call["occurred_at"]
+            ),
+            None,
+        )
+        if not match:
+            errors.append(
+                f"{prefix}: unpermitted zero-wait wait_threads call {call['call_id']} "
+                f"for run {call['run_id']}"
+            )
+            continue
+        used.add(str(match.get("event_id")))
+
+
+def validate_codex_wait_policy(
+    item: LoadedTask,
+    errors: list[str],
+    warnings: list[str],
+    codex_session_dir: Path | None,
+) -> None:
+    prefix = str(item.path)
+    authorizations = [
+        event
+        for event in item.runtime_events
+        if event.get("event_type") == "terminal-wait-authorized"
+    ]
+    completions = [
+        event
+        for event in item.runtime_events
+        if event.get("event_type") == "terminal-wait-finished"
+    ]
+    authorizations_by_id = {
+        str(event.get("event_id")): event for event in authorizations
+    }
+    authorization_ids = set(authorizations_by_id)
+    completed_authorizations: set[str] = set()
+    for event in completions:
+        authorization_id = str((event.get("payload") or {}).get("authorization_event_id") or "")
+        if authorization_id not in authorization_ids:
+            errors.append(
+                f"{prefix}: terminal-wait-finished references unknown authorization "
+                f"{authorization_id!r}"
+            )
+        elif authorization_id in completed_authorizations:
+            errors.append(
+                f"{prefix}: terminal wait authorization {authorization_id!r} completed twice"
+            )
+        else:
+            authorization = authorizations_by_id[authorization_id]
+            for field in ("run_id", "attempt_id", "provider", "worker_id"):
+                if event.get(field) != authorization.get(field):
+                    errors.append(
+                        f"{prefix}: terminal-wait-finished {event.get('event_id')!r} "
+                        f"must match authorization {authorization_id!r} field {field}"
+                    )
+            if parse_time(event.get("occurred_at")) < parse_time(
+                authorization.get("occurred_at")
+            ):
+                errors.append(
+                    f"{prefix}: terminal-wait-finished {event.get('event_id')!r} "
+                    "predates its authorization"
+                )
+            if (event.get("payload") or {}).get("outcome") not in {
+                "completed",
+                "timeout",
+                "call-error",
+            }:
+                errors.append(
+                    f"{prefix}: terminal-wait-finished {event.get('event_id')!r} "
+                    "requires outcome completed, timeout, or call-error"
+                )
+        completed_authorizations.add(authorization_id)
+
+    for run in item.task.get("runs", []):
+        if not codex_wait_policy_applies(run):
+            continue
+        run_id = str(run.get("run_id") or "")
+        budget = run.get("wait_budget")
+        if not isinstance(budget, dict):
+            errors.append(f"{prefix}: Codex v12 run {run_id} requires wait_budget")
+            continue
+        if budget.get("policy") != CODEX_WAIT_POLICY_NAME:
+            errors.append(f"{prefix}: run {run_id} wait_budget.policy must be single-short")
+        if budget.get("max_calls") != CODEX_WAIT_MAX_CALLS_PER_RUN:
+            errors.append(f"{prefix}: run {run_id} wait_budget.max_calls must equal 1")
+        if budget.get("max_timeout_ms") != CODEX_WAIT_MAX_TIMEOUT_MS:
+            errors.append(f"{prefix}: run {run_id} wait_budget.max_timeout_ms must equal 30000")
+        try:
+            enforced_at = parse_time(budget.get("enforced_at"))
+        except ValueError:
+            continue
+        run_authorizations = [
+            event
+            for event in authorizations
+            if event.get("run_id") == run_id
+            and parse_time(event.get("occurred_at")) >= enforced_at
+        ]
+        if len(run_authorizations) > CODEX_WAIT_MAX_CALLS_PER_RUN:
+            errors.append(
+                f"{prefix}: run {run_id} consumed {len(run_authorizations)} terminal waits; maximum is 1"
+            )
+        snapshots = [
+            event
+            for event in item.runtime_events
+            if event.get("event_type") == "status-observed"
+            and event.get("run_id") == run_id
+            and event.get("worker_id") == run.get("worker_id")
+            and parse_time(event.get("occurred_at")) >= enforced_at
+            and (event.get("payload") or {}).get("operation") == "inspect"
+            and (event.get("payload") or {}).get("timeout_ms") == 0
+            and (event.get("payload") or {}).get("source") == "coordinator"
+        ]
+        for event in run_authorizations:
+            payload = event.get("payload") or {}
+            timeout_ms = payload.get("timeout_ms")
+            if payload.get("source") != "coordinator":
+                errors.append(
+                    f"{prefix}: run {run_id} positive terminal wait cannot originate from Heartbeat"
+                )
+            if (
+                not isinstance(timeout_ms, int)
+                or isinstance(timeout_ms, bool)
+                or timeout_ms <= 0
+                or timeout_ms > CODEX_WAIT_MAX_TIMEOUT_MS
+            ):
+                errors.append(
+                    f"{prefix}: run {run_id} terminal wait timeout must be within 1..30000 ms"
+                )
+            if event.get("provider") != "codex" or event.get("worker_id") != run.get("worker_id"):
+                errors.append(
+                    f"{prefix}: run {run_id} terminal wait authorization must match its Codex Worker"
+                )
+            if not any(
+                parse_time(snapshot.get("occurred_at"))
+                <= parse_time(event.get("occurred_at"))
+                for snapshot in snapshots
+            ):
+                errors.append(
+                    f"{prefix}: run {run_id} terminal wait requires a prior coordinator zero-wait snapshot"
+                )
+
+    if codex_session_dir:
+        validate_codex_wait_session_audit(
+            item,
+            codex_session_dir,
+            authorizations,
+            errors,
+            warnings,
+        )
+
+
+def validate_codex_wait_session_audit(
+    item: LoadedTask,
+    session_dir: Path,
+    authorizations: list[dict[str, Any]],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    heartbeat = item.task.get("dispatch", {}).get("heartbeat") or {}
+    coordinator_id = str(heartbeat.get("coordinator_thread_id") or "")
+    if not coordinator_id:
+        return
+    if not session_dir.exists():
+        warnings.append(f"{item.path}: Codex session audit directory is unavailable: {session_dir}")
+        return
+    if session_dir.is_file():
+        session_files = [session_dir]
+    else:
+        coordinator_lookup = codex_thread_id(coordinator_id)
+        session_files = sorted(session_dir.rglob(f"*{coordinator_lookup}*.jsonl"))
+    if not session_files:
+        warnings.append(
+            f"{item.path}: no Codex session log found for coordinator {coordinator_id!r}"
+        )
+        return
+
+    runs_by_worker: dict[str, dict[str, Any]] = {}
+    for run in item.task.get("runs", []):
+        worker_id = str(run.get("worker_id") or "")
+        if not worker_id or not codex_wait_policy_applies(run):
+            continue
+        runs_by_worker[worker_id] = run
+        runs_by_worker[codex_thread_id(worker_id)] = run
+    calls: list[dict[str, Any]] = []
+    seen_call_ids: set[str] = set()
+    for path in session_files:
+        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "wait_threads" not in raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            call = codex_wait_call_from_session_record(record, path, lineno)
+            if call is None:
+                continue
+            call_id, arguments = call
+            if call_id in seen_call_ids:
+                continue
+            seen_call_ids.add(call_id)
+            timeout_ms = arguments.get("timeoutMs")
+            if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms <= 0:
+                continue
+            try:
+                occurred_at = parse_time(record.get("timestamp"))
+            except ValueError:
+                continue
+            for target in arguments.get("targets") or []:
+                worker_id = str(target.get("threadId") or "")
+                run = runs_by_worker.get(worker_id) or runs_by_worker.get(
+                    codex_thread_id(worker_id)
+                )
+                if not run:
+                    continue
+                budget = run.get("wait_budget") or {}
+                try:
+                    enforced_at = parse_time(budget.get("enforced_at"))
+                except ValueError:
+                    continue
+                if occurred_at < enforced_at:
+                    continue
+                calls.append(
+                    {
+                        "call_id": call_id,
+                        "run_id": run.get("run_id"),
+                        "worker_id": run.get("worker_id"),
+                        "timeout_ms": timeout_ms,
+                        "occurred_at": occurred_at,
+                        "enforced_at": enforced_at,
+                    }
+                )
+
+    used_authorizations: set[str] = set()
+    for call in sorted(calls, key=lambda value: value["occurred_at"]):
+        match = next(
+            (
+                event
+                for event in authorizations
+                if str(event.get("event_id")) not in used_authorizations
+                and event.get("run_id") == call["run_id"]
+                and event.get("worker_id") == call["worker_id"]
+                and (event.get("payload") or {}).get("source") == "coordinator"
+                and (event.get("payload") or {}).get("timeout_ms") == call["timeout_ms"]
+                and parse_time(event.get("occurred_at")) >= call["enforced_at"]
+                and parse_time(event.get("occurred_at")) <= call["occurred_at"]
+            ),
+            None,
+        )
+        if not match:
+            errors.append(
+                f"{item.path}: unpermitted positive wait_threads call {call['call_id']} "
+                f"for run {call['run_id']} timeoutMs={call['timeout_ms']}"
+            )
+            continue
+        used_authorizations.add(str(match.get("event_id")))
+
+
+def codex_thread_id(value: str) -> str:
+    return value.removeprefix("codex-thread:")
+
+
+def codex_wait_call_from_session_record(
+    record: dict[str, Any], path: Path, lineno: int
+) -> tuple[str, dict[str, Any]] | None:
+    """Read the structured wait_threads completion emitted by Codex rollout logs."""
+    payload = record.get("payload") or {}
+    item = payload.get("item") or {}
+    if (
+        record.get("type") == "event_msg"
+        and payload.get("type") == "item_completed"
+        and item.get("type") == "McpToolCall"
+        and item.get("server") == "codex_app"
+        and item.get("tool") == "wait_threads"
+    ):
+        call_id = str(item.get("id") or f"{path}:{lineno}")
+        return call_id, item.get("arguments") or {}
+
+    # Retain compatibility with the early v12 audit fixture format.
+    invocation = payload.get("invocation") or {}
+    if (
+        record.get("type") == "event_msg"
+        and payload.get("type") == "mcp_tool_call_end"
+        and invocation.get("server") == "codex_app"
+        and invocation.get("tool") == "wait_threads"
+    ):
+        call_id = str(payload.get("call_id") or f"{path}:{lineno}")
+        return call_id, invocation.get("arguments") or {}
     return None
 
 

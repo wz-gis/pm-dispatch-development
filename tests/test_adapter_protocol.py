@@ -61,6 +61,80 @@ class AdapterProtocolCase(unittest.TestCase):
             {"title": "BUG-041 修复", "prompt": "implement and verify"},
         )
 
+    def test_codex_inspect_is_an_immediate_snapshot(self) -> None:
+        invocation = self.protocol.build_invocation(
+            self.codex_adapter,
+            "inspect",
+            {"worker_id": "thread-42", "event_cursor": "cursor-8"},
+        )
+        self.assertEqual(invocation["target"], "wait_threads")
+        self.assertEqual(
+            invocation["inputs"],
+            {
+                "worker_id": "thread-42",
+                "event_cursor": "cursor-8",
+                "timeout_ms": 0,
+            },
+        )
+
+    def test_codex_inspect_timeout_cannot_be_overridden(self) -> None:
+        with self.assertRaisesRegex(
+            self.protocol.AdapterProtocolError, "cannot override fixed inputs"
+        ):
+            self.protocol.build_invocation(
+                self.codex_adapter,
+                "inspect",
+                {"worker_id": "thread-42", "timeout_ms": 120_000},
+            )
+
+    def test_codex_terminal_wait_requires_positive_explicit_timeout(self) -> None:
+        with self.assertRaisesRegex(self.protocol.AdapterProtocolError, "missing inputs"):
+            self.protocol.build_invocation(
+                self.codex_adapter,
+                "wait",
+                {"worker_id": "thread-42"},
+            )
+        for invalid_timeout in (0, -1, True):
+            with self.subTest(timeout_ms=invalid_timeout):
+                with self.assertRaisesRegex(
+                    self.protocol.AdapterProtocolError,
+                    "terminal wait requires timeout_ms > 0",
+                ):
+                    self.protocol.build_invocation(
+                        self.codex_adapter,
+                        "wait",
+                        {"worker_id": "thread-42", "timeout_ms": invalid_timeout},
+                    )
+        invocation = self.protocol.build_invocation(
+            self.codex_adapter,
+            "wait",
+            {
+                "worker_id": "thread-42",
+                "event_cursor": "cursor-8",
+                "timeout_ms": 30_000,
+            },
+        )
+        self.assertEqual(invocation["inputs"]["timeout_ms"], 30_000)
+
+    def test_codex_terminal_wait_rejects_long_or_heartbeat_waits(self) -> None:
+        with self.assertRaisesRegex(
+            self.protocol.AdapterProtocolError, "timeout_ms exceeds 30000"
+        ):
+            self.protocol.build_invocation(
+                self.codex_adapter,
+                "wait",
+                {"worker_id": "thread-42", "timeout_ms": 30_001},
+            )
+        with self.assertRaisesRegex(
+            self.protocol.AdapterProtocolError, "not allowed from source 'heartbeat'"
+        ):
+            self.protocol.build_invocation(
+                self.codex_adapter,
+                "wait",
+                {"worker_id": "thread-42", "timeout_ms": 30_000},
+                source="heartbeat",
+            )
+
     def test_builds_machine_invocation_from_declared_inputs(self) -> None:
         invocation = self.protocol.build_invocation(
             self.adapter,
@@ -142,6 +216,16 @@ class AdapterProtocolCase(unittest.TestCase):
         self.assertEqual(result["continuation_token"], "continuation-42")
         self.assertEqual(result["event_cursor"], "event-9")
         self.assertEqual(result["delegation"], {"summary": "verified"})
+
+    def test_codex_idle_and_interrupted_require_reconciliation_not_completion(self) -> None:
+        for raw in ("idle", "interrupted", {"type": "idle"}):
+            result = self.protocol.extract_operation_result(
+                self.codex_adapter, "inspect",
+                {"threadId": "thread-42", "status": raw, "latestTurn": {"status": "interrupted"}},
+            )
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["probe_status"], "interrupted")
+            self.assertTrue(result["requires_reconciliation"])
 
 
 if __name__ == "__main__":

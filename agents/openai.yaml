@@ -1,4 +1,4 @@
 interface:
-  display_name: "PM 调度式开发"
-  short_description: "结构化任务命名、Worker调度、证据与自动Gate校验"
-  default_prompt: "使用 $pm-dispatch-development 管理这个任务的分发、证据和 Gate 收口。"
+  display_name: "PM Dispatch Development"
+  short_description: "Recoverable task delivery with evidence-based gates"
+  default_prompt: "Use $pm-dispatch-development to manage this task, collect evidence, and report the next action in my language."

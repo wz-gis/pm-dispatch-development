@@ -9,7 +9,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_validate_pm_dispatch import base_task
+from tests.test_validate_pm_dispatch import (
+    base_task,
+    codex_dispatch,
+    codex_run,
+    split_runtime,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -199,8 +204,95 @@ class MigratorCase(unittest.TestCase):
         normalized = self.migrator.migrate_task(task, self.adapters, NOW)
         self.assertIsNone(normalized["dispatch"]["resolution"]["model_id"])
         self.assertIsNone(normalized["runs"][0]["model_id"])
-        self.assertEqual(normalized["dispatch"]["resolution"]["adapter_version"], "9")
-        self.assertEqual(normalized["runs"][0]["adapter_version"], "9")
+        self.assertEqual(normalized["dispatch"]["resolution"]["adapter_version"], "13")
+        self.assertEqual(normalized["runs"][0]["adapter_version"], "13")
+        self.assertEqual(normalized["runs"][0]["wait_budget"]["max_calls"], 1)
+        self.assertEqual(normalized["runs"][0]["wait_budget"]["max_timeout_ms"], 30000)
+        self.assertEqual(
+            normalized["runs"][0]["inspection_budget"]["min_interval_seconds"],
+            600,
+        )
+
+    def test_active_v4_codex_run_upgrades_to_v13_control_budgets(self) -> None:
+        task = base_task("SPEC-101")
+        task.update(
+            {
+                "display_name": "SPEC-101 P1 AA Add page",
+                "title": "Add page",
+                "type": "spec",
+                "status": "IN_IMPL",
+            }
+        )
+        task["lifecycle"]["phase"] = "implementation"
+        task["dispatch"] = codex_dispatch()
+        task["runs"] = [codex_run()]
+        task, runtime = split_runtime(task)
+        runtime["resolution"]["adapter_version"] = "11"
+        runtime["runs"][0]["adapter_version"] = "11"
+        runtime["runs"][0].pop("wait_budget")
+
+        normalized = self.migrator.normalize_runtime_routes(
+            task, runtime, self.adapters, NOW
+        )
+
+        self.assertEqual(normalized["resolution"]["adapter_version"], "13")
+        self.assertEqual(normalized["runs"][0]["adapter_version"], "13")
+        self.assertEqual(
+            normalized["runs"][0]["wait_budget"],
+            {
+                "policy": "single-short",
+                "max_calls": 1,
+                "max_timeout_ms": 30000,
+                "enforced_at": NOW,
+            },
+        )
+        self.assertEqual(
+            normalized["runs"][0]["inspection_budget"],
+            {
+                "policy": "incremental-debounce",
+                "min_interval_seconds": 600,
+                "max_calls_per_cycle": 1,
+                "enforced_at": NOW,
+            },
+        )
+
+    def test_terminal_v4_run_preserves_v11_history(self) -> None:
+        task = base_task("SPEC-101")
+        task.update(
+            {
+                "display_name": "SPEC-101 P1 AA Add page",
+                "title": "Add page",
+                "type": "spec",
+                "status": "VERIFIED",
+            }
+        )
+        task["lifecycle"]["phase"] = "closure"
+        task["closure"]["status"] = "ready"
+        task["verification"]["status"] = "L1_VERIFIED"
+        task["dispatch"] = codex_dispatch()
+        run = codex_run()
+        run.update({"adapter_version": "11", "status": "succeeded", "finished_at": NOW})
+        run.pop("wait_budget")
+        run["attempts"][0].update({"status": "succeeded", "finished_at": NOW})
+        task["runs"] = [run]
+        task, runtime = split_runtime(task)
+        runtime["resolution"]["adapter_version"] = "11"
+
+        normalized = self.migrator.normalize_runtime_routes(
+            task, runtime, self.adapters, NOW
+        )
+
+        self.assertEqual(normalized["resolution"]["adapter_version"], "11")
+        self.assertEqual(normalized["runs"][0]["adapter_version"], "11")
+        self.assertNotIn("wait_budget", normalized["runs"][0])
+        errors: list[str] = []
+        self.migrator.validate_adapter_resolution(
+            self.migrator.compose_task_runtime(task, normalized),
+            self.adapters,
+            errors,
+            "terminal-runtime",
+        )
+        self.assertEqual(errors, [])
 
     def test_worker_migration_prefers_milestones_and_backfills_autonomy(self) -> None:
         migrated = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
@@ -250,6 +342,32 @@ class MigratorCase(unittest.TestCase):
         self.assertEqual(heartbeat["interval_minutes"], 10)
         self.assertNotIn("monitor_thread_id", heartbeat)
         self.assertTrue(heartbeat["lightweight"])
+        self.assertEqual(heartbeat["coordinator_epoch"], 1)
+
+    def test_workerless_queued_runtime_becomes_bounded_provisioning(self) -> None:
+        task = base_task("SPEC-101")
+        task.update({"status": "IN_IMPL", "type": "spec"})
+        task["lifecycle"]["phase"] = "implementation"
+        task["dispatch"] = codex_dispatch()
+        run = codex_run()
+        run["status"] = "queued"
+        run["worker_id"] = None
+        run["attempts"][0]["status"] = "queued"
+        run["attempts"][0]["lease"] = None
+        task["runs"] = [run]
+        task, runtime = split_runtime(task)
+
+        normalized = self.migrator.normalize_runtime_routes(
+            task, runtime, self.adapters, NOW
+        )
+
+        migrated = normalized["runs"][0]
+        self.assertEqual(migrated["status"], "provisioning")
+        self.assertEqual(migrated["attempts"][0]["status"], "provisioning")
+        self.assertEqual(migrated["provisioning"]["status"], "pending")
+        self.assertEqual(
+            migrated["provisioning"]["deadline_at"], "2026-07-13T12:02:00Z"
+        )
 
     def test_stopped_legacy_heartbeat_backfills_historical_coordinator(self) -> None:
         task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
