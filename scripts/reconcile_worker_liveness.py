@@ -105,6 +105,7 @@ def reconcile_liveness(
     grace_seconds: int = 60,
     *,
     latest_turn_status: str | None = None,
+    terminal_outcome: str | None = None,
     command_id: str | None = None,
     command_deadline: str | None = None,
     stale_after_seconds: int = 1800,
@@ -129,6 +130,18 @@ def reconcile_liveness(
         raise LivenessError(f"run {run_id!r} has no Lease")
 
     now_text = isoformat(now)
+    if terminal_outcome and terminal_outcome not in TERMINAL:
+        raise LivenessError(f"unsupported terminal_outcome {terminal_outcome!r}")
+    if probe_status == "idle" and latest_turn_status == "completed":
+        if not terminal_outcome:
+            raise LivenessError(
+                "idle Worker with a completed latest turn requires an explicit terminal outcome"
+            )
+        probe_status = terminal_outcome
+    elif terminal_outcome:
+        raise LivenessError(
+            "terminal_outcome is only valid for an idle Worker with a completed latest turn"
+        )
     if probe_status == "idle" and latest_turn_status == "interrupted":
         probe_status = "interrupted"
     if probe_status in {"running", "queued", "idle", "interrupted"}:
@@ -234,6 +247,11 @@ def main() -> int:
     parser.add_argument("--lease-minutes", type=int, default=30)
     parser.add_argument("--grace-seconds", type=int, default=60)
     parser.add_argument("--latest-turn-status", choices=["running", "completed", "failed", "interrupted"])
+    parser.add_argument(
+        "--terminal-outcome",
+        choices=["succeeded", "failed", "blocked", "cancelled"],
+        help="Required classification for idle + completed latest turn",
+    )
     parser.add_argument("--command-id", help="ID of a verified running build/test process")
     parser.add_argument("--command-deadline", help="Fixed expected completion deadline; never slide it each tick")
     parser.add_argument("--stale-after-seconds", type=int, default=1800)
@@ -259,7 +277,8 @@ def main() -> int:
         task, outcome = reconcile_liveness(
             source, args.run_id, args.probe_status, now, args.lease_minutes, args.grace_seconds,
             latest_turn_status=args.latest_turn_status, command_id=args.command_id,
-            command_deadline=args.command_deadline, stale_after_seconds=args.stale_after_seconds,
+            terminal_outcome=args.terminal_outcome, command_deadline=args.command_deadline,
+            stale_after_seconds=args.stale_after_seconds,
         )
         if args.write:
             atomic_write(path, task)

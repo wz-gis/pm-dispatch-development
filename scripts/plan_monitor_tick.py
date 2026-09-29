@@ -16,6 +16,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from record_runtime_event import resolve_runtime_path  # noqa: E402
+from monitor_policy import pending_inspection_authorizations  # noqa: E402
 from validate_pm_dispatch import load_structured_file, parse_time  # noqa: E402
 
 
@@ -53,7 +54,12 @@ def plan_monitor_tick(
         None,
     )
     if heartbeat.get("status") != "active":
-        return {"action": "stop", "reason": "heartbeat-not-active", "run_id": run_id}
+        return {
+            "action": "stop",
+            "reason": "heartbeat-not-active",
+            "run_id": run_id,
+            "required_host_action": "none",
+        }
     if not isinstance(run, dict):
         return {"action": "repair-runtime", "reason": "target-run-missing", "run_id": run_id}
     status = run.get("status")
@@ -62,8 +68,18 @@ def plan_monitor_tick(
                and event.get("run_id") == run_id
                and parse_time(event.get("occurred_at")) >= parse_time(run.get("finished_at"))
                for event in events):
-            return {"action": "stop", "reason": "terminal-already-collected", "run_id": run_id}
-        return {"action": "collect-terminal", "reason": "run-terminal", "run_id": run_id}
+            return {
+                "action": "stop",
+                "reason": "terminal-already-collected",
+                "run_id": run_id,
+                "required_host_action": "pause-heartbeat",
+            }
+        return {
+            "action": "collect-terminal",
+            "reason": "run-terminal",
+            "run_id": run_id,
+            "required_host_action": "collect-once-then-pause-heartbeat",
+        }
     if status == "provisioning":
         deadline = parse_time((run.get("provisioning") or {}).get("deadline_at"))
         if now >= deadline:
@@ -71,6 +87,7 @@ def plan_monitor_tick(
                 "action": "rollback-provisioning",
                 "reason": "provisioning-deadline-expired",
                 "run_id": run_id,
+                "required_host_action": "rollback-provisioning-then-pause-heartbeat",
             }
         return {
             "action": "sleep",
@@ -83,6 +100,21 @@ def plan_monitor_tick(
     budget = run.get("inspection_budget") or {}
     interval = int(budget.get("min_interval_seconds") or 600)
     enforced_at = parse_time(budget.get("enforced_at"))
+    pending = [
+        event
+        for event in pending_inspection_authorizations(events, str(run_id))
+        if parse_time(event.get("occurred_at")) >= enforced_at
+    ]
+    if pending:
+        latest = max(pending, key=lambda event: parse_time(event.get("occurred_at")))
+        return {
+            "action": "reconcile-pending-inspection",
+            "reason": "status-observation-missing",
+            "run_id": run_id,
+            "authorization_event_id": latest.get("event_id"),
+            "required_host_action": "recover-result-once-or-pause-heartbeat",
+            "resume_allowed": False,
+        }
     prior = [
         event
         for event in events

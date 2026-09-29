@@ -41,6 +41,8 @@ def adapters() -> dict:
 
 
 def legacy_worker_task() -> dict:
+    heartbeat = copy.deepcopy(codex_dispatch()["heartbeat"])
+    heartbeat.pop("target_run_id")
     return {
         "id": "bug001-env-block",
         "display_name": "bug001-env-block",
@@ -65,7 +67,7 @@ def legacy_worker_task() -> dict:
                 "override_allowed": False,
             },
             "batch": None,
-            "heartbeat": None,
+            "heartbeat": heartbeat,
             "escalation_triggers": [],
         },
         "runs": [
@@ -204,8 +206,8 @@ class MigratorCase(unittest.TestCase):
         normalized = self.migrator.migrate_task(task, self.adapters, NOW)
         self.assertIsNone(normalized["dispatch"]["resolution"]["model_id"])
         self.assertIsNone(normalized["runs"][0]["model_id"])
-        self.assertEqual(normalized["dispatch"]["resolution"]["adapter_version"], "13")
-        self.assertEqual(normalized["runs"][0]["adapter_version"], "13")
+        self.assertEqual(normalized["dispatch"]["resolution"]["adapter_version"], "15")
+        self.assertEqual(normalized["runs"][0]["adapter_version"], "15")
         self.assertEqual(normalized["runs"][0]["wait_budget"]["max_calls"], 1)
         self.assertEqual(normalized["runs"][0]["wait_budget"]["max_timeout_ms"], 30000)
         self.assertEqual(
@@ -213,7 +215,7 @@ class MigratorCase(unittest.TestCase):
             600,
         )
 
-    def test_active_v4_codex_run_upgrades_to_v13_control_budgets(self) -> None:
+    def test_active_v4_codex_run_upgrades_to_v15_control_budgets(self) -> None:
         task = base_task("SPEC-101")
         task.update(
             {
@@ -235,8 +237,8 @@ class MigratorCase(unittest.TestCase):
             task, runtime, self.adapters, NOW
         )
 
-        self.assertEqual(normalized["resolution"]["adapter_version"], "13")
-        self.assertEqual(normalized["runs"][0]["adapter_version"], "13")
+        self.assertEqual(normalized["resolution"]["adapter_version"], "15")
+        self.assertEqual(normalized["runs"][0]["adapter_version"], "15")
         self.assertEqual(
             normalized["runs"][0]["wait_budget"],
             {
@@ -294,13 +296,12 @@ class MigratorCase(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
-    def test_worker_migration_prefers_milestones_and_backfills_autonomy(self) -> None:
+    def test_worker_migration_requires_heartbeat_and_backfills_autonomy(self) -> None:
         migrated = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
         dispatch = migrated["dispatch"]
-        self.assertEqual(dispatch["resolution"]["monitor_mode"], "event-lease")
-        self.assertIn("lease-watchdog", dispatch["resolution"]["capabilities"])
-        self.assertIn("terminal-event-wait", dispatch["resolution"]["capabilities"])
-        self.assertIsNone(dispatch["heartbeat"])
+        self.assertEqual(dispatch["resolution"]["monitor_mode"], "heartbeat")
+        self.assertIn("heartbeat", dispatch["resolution"]["capabilities"])
+        self.assertEqual(dispatch["heartbeat"]["status"], "active")
         self.assertEqual(dispatch["autonomy_policy"]["default_action"], "proceed")
         self.assertEqual(
             dispatch["design_freeze"]["change_policy"],
@@ -371,6 +372,10 @@ class MigratorCase(unittest.TestCase):
 
     def test_stopped_legacy_heartbeat_backfills_historical_coordinator(self) -> None:
         task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
+        task["runs"][0].update({"status": "succeeded", "finished_at": NOW})
+        task["runs"][0]["attempts"][0].update(
+            {"status": "succeeded", "finished_at": NOW}
+        )
         task["dispatch"]["heartbeat"] = {
             "automation_id": "legacy-heartbeat",
             "interval_minutes": 15,
@@ -387,7 +392,7 @@ class MigratorCase(unittest.TestCase):
             "legacy-coordinator:BUG-001",
         )
 
-    def test_paused_legacy_heartbeat_backfills_historical_coordinator(self) -> None:
+    def test_active_codex_migration_rejects_paused_heartbeat(self) -> None:
         task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)
         task["dispatch"]["heartbeat"] = {
             "automation_id": "legacy-heartbeat",
@@ -398,12 +403,10 @@ class MigratorCase(unittest.TestCase):
             "status": "paused",
         }
 
-        normalized = self.migrator.migrate_task(task, self.adapters, NOW)
-
-        self.assertEqual(
-            normalized["dispatch"]["heartbeat"]["coordinator_thread_id"],
-            "legacy-coordinator:BUG-001",
-        )
+        with self.assertRaisesRegex(
+            self.migrator.MigrationError, "active coordinator Heartbeat"
+        ):
+            self.migrator.migrate_task(task, self.adapters, NOW)
 
     def test_existing_v3_external_task_drops_undeclared_model(self) -> None:
         task = self.migrator.migrate_task(legacy_worker_task(), self.adapters, NOW)

@@ -13,6 +13,7 @@ The built-in renderer currently emits these Chinese labels; this is its existing
 
 - Task displays only `<id> <title>`, without duplicate priority/area/`display_name`.
 - Current Progress contains verified facts. Next Action contains one action or decision.
+- For a pending user decision, show the proposal's current state and the exact decision needed in Next Action. Use existing Task/decision records; do not add an unrecognized status enum or force a hard Blocker for display. Include a short pending project-decision note for PM migration, which has no delivery Task of its own. Read-only panel requests display pending decisions without resubmitting their input cards.
 - Order active and blocked work first, then pending work, then optional items; sort P0-P3 within groups.
 - Keep Owner, Worker, Run, Lease, and Adapter out of the main panel. Add runtime detail only on request or for an abnormal state.
 - Do not repeat the table as prose or cards.

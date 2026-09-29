@@ -206,7 +206,7 @@ def codex_run(task_id: str = "SPEC-101", index: int = 1) -> dict:
         "worker_id": f"codex-thread:thread-{index}",
         "worker_replacement_reason": None,
         "provider": "codex",
-        "adapter_version": "13",
+        "adapter_version": "15",
         "model_id": None,
         "reasoning_profile": "standard",
         "provider_reasoning_effort": "inherit",
@@ -273,7 +273,7 @@ def codex_dispatch() -> dict:
         },
         "resolution": {
             "provider": "codex",
-            "adapter_version": "13",
+            "adapter_version": "15",
             "model_id": None,
             "reasoning_profile": "standard",
             "provider_reasoning_effort": "inherit",
@@ -328,7 +328,7 @@ def codex_dispatch() -> dict:
 def thin_wrapper_delegation() -> dict:
     return {
         "mode": "thin-wrapper-subagent",
-        "agent": "gemini-flash-medium",
+        "agent": "external-agent-test",
         "initial_invocation_limit": 1,
         "repair_invocation_limit": 1,
         "retry_policy": "focused-verification-failure-only",
@@ -883,6 +883,31 @@ class ValidatorCase(unittest.TestCase):
         task["dispatch"]["heartbeat"]["target_run_id"] = second["run_id"]
         self.assert_invalid(task, "without an allowed worker_replacement_reason")
 
+    def test_single_worker_can_continue_past_legacy_run_limit(self) -> None:
+        for legacy_limit in (None, 3, 8):
+            with self.subTest(legacy_limit=legacy_limit):
+                task = self.worker_task()
+                reuse = task["dispatch"]["worker_reuse"]
+                if legacy_limit is None:
+                    reuse.pop("max_runs_per_worker", None)
+                else:
+                    reuse["max_runs_per_worker"] = legacy_limit
+                worker_id = task["runs"][0]["worker_id"]
+                task["runs"] = []
+                for index in range(1, 10):
+                    run = codex_run(index=index)
+                    run["worker_id"] = worker_id
+                    run["allow_parallel"] = False
+                    if index < 9:
+                        run["status"] = "succeeded"
+                        run["finished_at"] = NOW
+                        run["attempts"][0]["status"] = "succeeded"
+                        run["attempts"][0]["finished_at"] = NOW
+                    task["runs"].append(run)
+                task["dispatch"]["heartbeat"]["target_run_id"] = task["runs"][-1]["run_id"]
+                result = self.run_task(task)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_single_worker_allows_irrecoverable_worker_replacement(self) -> None:
         task = self.worker_task()
         first = task["runs"][0]
@@ -1085,8 +1110,9 @@ class ValidatorCase(unittest.TestCase):
         ]
         self.assert_invalid(task, "at least two materially different recovery attempts")
 
-    def test_event_lease_monitor_does_not_require_heartbeat_metadata(self) -> None:
+    def test_visible_codex_worker_rejects_event_lease_without_heartbeat(self) -> None:
         task = self.worker_task()
+        task["dispatch"]["heartbeat_required"] = False
         task["dispatch"]["resolution"].update(
             {
                 "monitor_mode": "event-lease",
@@ -1102,8 +1128,7 @@ class ValidatorCase(unittest.TestCase):
             }
         )
         task["dispatch"]["heartbeat"] = None
-        result = self.run_task(task)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_invalid(task, "create_thread has no verified parent callback")
 
     def test_event_lease_requires_progress_timestamp(self) -> None:
         task = self.worker_task()
@@ -1271,6 +1296,27 @@ class ValidatorCase(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("less than 600 seconds", result.stderr)
+
+    def test_validator_rejects_new_snapshot_after_unreconciled_authorization(self) -> None:
+        task, runtime = split_runtime(self.worker_task())
+        result = self.run_task(
+            task,
+            runtime=runtime,
+            runtime_events=[
+                wait_event(
+                    "inspect-auth-001",
+                    "status-inspect-authorized",
+                    "2026-07-13T12:00:00Z",
+                ),
+                wait_event(
+                    "inspect-auth-002",
+                    "status-inspect-authorized",
+                    "2026-07-13T12:10:00Z",
+                ),
+            ],
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("was not reconciled before another snapshot", result.stderr)
 
     def test_validator_debounces_scheduled_inspection_after_post_create(self) -> None:
         task, runtime = split_runtime(self.worker_task())

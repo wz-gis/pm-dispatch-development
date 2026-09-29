@@ -327,7 +327,6 @@ def normalize_dispatch_efficiency_contract(
         dispatch["worker_reuse"] = {
             "mode": "sticky",
             "reuse_across_gates": True,
-            "max_runs_per_worker": 6,
             "replacement_triggers": [
                 "irrecoverable-worker",
                 "safety-boundary-change",
@@ -341,7 +340,6 @@ def normalize_dispatch_efficiency_contract(
         dispatch["worker_reuse"] = {
             "mode": "isolated",
             "reuse_across_gates": False,
-            "max_runs_per_worker": 1,
             "replacement_triggers": [
                 "irrecoverable-worker",
                 "safety-boundary-change",
@@ -469,6 +467,18 @@ def normalize_model_routes(
     adapter = adapters.get(str(provider))
     if not adapter:
         raise MigrationError(f"worker task uses unknown provider {provider!r}")
+    active_runs = [
+        run
+        for run in task.get("runs", [])
+        if run.get("status") in {"provisioning", "queued", "running"}
+    ]
+    heartbeat = dispatch.get("heartbeat") or {}
+    if provider == "codex" and active_runs:
+        if dispatch.get("heartbeat_required") is not True or heartbeat.get("status") != "active":
+            raise MigrationError(
+                "active visible Codex Worker migration requires an active coordinator "
+                "Heartbeat; activate it before upgrading the Runtime"
+            )
     profile = resolution.get("reasoning_profile") or dispatch.get("reasoning_profile")
     model_route = adapter.get("components", {}).get("model", {}).get("profiles", {}).get(profile)
     if model_route:
@@ -531,6 +541,18 @@ def normalize_runtime_routes(
     adapter = adapters.get(provider)
     if not adapter:
         raise MigrationError(f"worker task uses unknown provider {provider!r}")
+    dispatch = task.get("dispatch", {})
+    heartbeat = runtime.get("heartbeat") or {}
+    if provider == "codex" and active_runs:
+        if dispatch.get("heartbeat_required") is not True or heartbeat.get("status") != "active":
+            raise MigrationError(
+                "active visible Codex Worker migration requires an active coordinator "
+                "Heartbeat; activate it before upgrading the Runtime"
+            )
+        resolution["monitor_mode"] = "heartbeat"
+        capabilities = set(resolution.get("capabilities") or [])
+        capabilities.add("heartbeat")
+        resolution["capabilities"] = sorted(capabilities)
     profile = resolution.get("reasoning_profile") or task.get("dispatch", {}).get(
         "reasoning_profile"
     )

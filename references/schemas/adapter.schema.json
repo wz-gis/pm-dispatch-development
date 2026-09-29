@@ -152,6 +152,7 @@
       "required": ["target", "input_fields", "optional_input_fields", "result_paths", "timeout_seconds", "idempotency"],
       "properties": {
         "target": {"type": "string", "minLength": 1},
+        "supported": {"type": "boolean"},
         "input_fields": {
           "type": "array",
           "minItems": 1,

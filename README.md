@@ -30,7 +30,6 @@ The examples below reflect recurring use patterns; the task-type distribution ab
 | Feature delivery | "Dispatch SPEC-002 through implementation and browser acceptance." | One Worker reused across Gates; only new scope/evidence sent |
 | Interrupted work | "Reconcile the original Worker before replacing it." | Recover from Run/Attempt/Lease and persisted milestones |
 | Environment-blocked acceptance | "Separate completed code from missing live API or browser evidence." | Honest partial/blocked result and one unblock action |
-| Optional external implementation | "Gemini execute SPEC-002." | One visible Codex wrapper, one initial external-agent invocation |
 
 Release/migration and cross-repository work use the same records with broader verification and dependency/lock checks. Git commits, pushes, production changes, and visible task creation still require the user's requested scope and the host's permissions.
 
@@ -49,16 +48,19 @@ and report verified progress and the next action.
 
 Local helpers require Python 3.11+; the lock-based helpers use POSIX `fcntl` (macOS/Linux). Native Windows is not validated. Core JSON and supported YAML-subset files need no third-party dependency; general YAML may require PyYAML.
 
-The visible Codex path also requires host task/Heartbeat tools. External implementation additionally requires an installed `sub-agents` Skill and a matching local agent definition. No external agent, credential, or model is bundled. See [delegated execution](references/delegated-subagent.md).
+Codex execution follows [live host capabilities](references/adapters/codex-routing.md): native internal agents use parent completion notifications; visible desktop Workers require the task/Heartbeat tools. Internal agents are not visible background threads and cannot promise monitoring across disconnection. When neither path is supported, use `direct` where scope permits. Optional external delegation remains inactive unless explicitly requested and permitted; no external agent, credential, or model is bundled.
 
 ## How It Works
 
 ```text
-Current PM conversation + Heartbeat
-  -> one visible Worker per dispatched task (reused across Gates)
-       -> optional one-shot external implementation
+One project PM conversation
+  -> internal native Worker + parent completion notifications
+  OR visible Worker + task Heartbeat on the same PM
+  -> reuse the selected Worker across related work and Gates
   <- evidence, latest milestone, and one next action
 ```
+
+Reuse the project PM across bugs and features. If context reduction is insufficient, prepare a compact handoff and obtain user approval before creating a replacement PM. Keep existing Workers through the transfer; Run count alone never forces replacement. See [coordinator migration](references/project-coordinator.md).
 
 | Term | Purpose |
 | --- | --- |
@@ -93,7 +95,7 @@ The 10-minute monitor stays in the dispatching conversation; no second monitor t
 - `batch-worker`: 2-4 related tasks sharing a project/Gate, with separate conclusions.
 - `full-dispatch`: high-risk or cross-project work with ordered dependencies and broader evidence.
 
-Codex child Workers use the dispatch host's default model; temporary parent-task model overrides are not automatically copied. `fast`/`standard` inherit effort; `deep`/`critical` map to `high`. Other hosts need an adapter that implements the declared operations: the bundled [external CLI adapter](references/adapters/generic.md) is a portability example, not a prebuilt Gemini/other-agent integration.
+Codex child Workers use the dispatch host's default model; temporary parent-task model overrides are not automatically copied. `fast`/`standard` inherit effort; `deep`/`critical` map to `high`. Other hosts need an adapter that implements the declared operations; the bundled [external CLI adapter](references/adapters/generic.md) is a portability example, not a prebuilt provider integration.
 
 ## Inspect And Validate
 

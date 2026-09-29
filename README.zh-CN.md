@@ -30,7 +30,6 @@
 | 功能开发和验收 | 分发 SPEC-002，完成实现和浏览器验收 | 同一 Worker 跨 Gate 复用，只追加差量 |
 | Worker 断线 | 先核对原 Worker 和 Lease，不要直接替换 | 保留所有权，从里程碑和 Artifact 恢复 |
 | 环境导致无法验收 | 区分已完成代码和缺失的真实 API/页面证据 | 明确 partial/blocked 状态和一个解阻动作 |
-| 可选外部模型实施 | Gemini执行 SPEC-002 | 一个可见 Codex 薄壳、一次初始外部实施调用 |
 
 跨仓库联调、数据库迁移和发布也使用同一套记录，但需要更广的验证与依赖/资源锁检查。Git 提交、推送、生产变更及创建可见任务，仍受用户要求的范围和宿主授权约束。
 
@@ -49,16 +48,19 @@
 
 本地脚本要求 Python 3.11+；锁相关脚本使用 POSIX `fcntl`，适用于 macOS/Linux，未验证原生 Windows。JSON 和受支持的 YAML 子集无需第三方依赖，完整 YAML 语法可能需要 PyYAML。
 
-可见 Worker 路径需要宿主提供任务和 Heartbeat 工具。外部实施还需要独立安装 `sub-agents` Skill 及本地 Agent 定义；本 Skill 不附带外部模型、账号或凭据。已有中文短语继续支持，英文可用 `Gemini execute` / `DeepSeek execute`。模型版本由本地定义决定，不在公共文档中写死。
+Codex 按[当前工具能力](references/adapters/codex-routing.md)选择执行方式：内置子代理通过父线程完成通知收口；独立可见 Worker 需要任务和 Heartbeat 工具。内部子代理不等于可见后台线程，也不承诺断线后持续监控。两条路径都不可用时，在范围允许的情况下使用 `direct`。外部代理仍默认不启用，只有当前请求明确选择且宿主策略允许时才能使用；本 Skill 不附带外部模型、账号或凭据。
 
 ## 工作方式
 
 ```text
-当前 PM 对话 + Heartbeat
-  -> 每个分发任务一个可见 Worker，跨 Gate 复用
-       -> 可选的一次外部实施
+每个项目一个 PM 对话
+  -> 内置子代理 + 父线程完成通知
+  或 独立可见 Worker + 同一 PM 内的任务 Heartbeat
+  -> 相关工作与 Gate 复用选定的 Worker
   <- 证据、最新里程碑、一个下一步
 ```
+
+同一项目的 Bug 和 Spec 共用 PM 对话。精简上下文后仍无法可靠继续时，先准备必要交接包，获得用户同意后才创建替代 PM。迁移沿用原 Worker；Run 次数本身不触发替换。详见[协调器迁移规则](references/project-coordinator.md)。
 
 PM 指当前对话中负责项目协调的 Agent，Worker 是执行指定范围的 Agent/任务。Task 保存稳定范围和验收契约，Runtime 保存运行态与所有权，Evidence 保存结果证据。Run 是一次执行单元，Attempt 是它的可恢复尝试，Lease 是有期限的所有权，Gate 是证据校验关口。编译通过不等于真实链路验收通过。
 

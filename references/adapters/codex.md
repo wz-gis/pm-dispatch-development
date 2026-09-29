@@ -1,18 +1,35 @@
 # Codex Adapter
 
-Read only when creating or recovering a visible Codex Worker. Use Resolver effort; do not choose its model in the Skill.
+Read when `codex-routing.md` selects visible Codex threads, not native internal agents. Check actual host tool availability and creation authorization first. Resolver chooses effort; omit `model` so the Worker uses the dispatch host default.
 
-1. Resolve the route, freeze scope/contracts/safety/acceptance, and copy the fingerprint into the Run.
-2. Record the current PM conversation as the sole `coordinator_thread_id` with `coordinator_epoch`. Use `automation_update(kind=heartbeat)` to activate its Heartbeat for the intended Run, never for the Worker.
-3. Run `manage_dispatch_transaction.py begin` for a Run without a Worker ID. Provisioning defaults to 120 seconds; locks cannot outlive it.
-4. Run `dispatch_preflight.py`. It validates Heartbeat, Packet, and Coordinator budget. At 160K last-input tokens or 150 recorded model steps, stop creating new Workers; existing monitoring/closure remain allowed.
-5. For explicitly dispatched visible work, use `create_thread` with `worker_label`, omitting `model`. Once a real thread ID is available, run transaction `complete` to bind ID/Lease. On confirmed failure, stop Heartbeat and `rollback --heartbeat-stopped`. A queued `clientThreadId` is not a real thread ID; reconcile uncertain creation before retrying.
-6. Run `authorize_status_inspect.py --reason post-create --cycle-id <turn> --write`, then use its `native_arguments` for one zero-wait snapshot. Reference the authorization ID in the observation event; do not bypass authorization.
-7. If a short wait is needed, run `authorize_terminal_wait.py ... --timeout-ms 30000 --write`, call the returned arguments once, and record `terminal-wait-finished`. Each Run gets at most one positive wait. End the turn if unfinished.
-8. Every Heartbeat runs `plan_monitor_tick.py` once. `sleep`: stop. `inspect`: authorize a scheduled snapshot using the Heartbeat-run cycle ID, then persist `reconcile_worker_liveness.py --write` once. No positive waits or loops. `diagnosis-required` gets one focused check; `awaiting-diagnosis` never resends a continuation. Verified long commands use a fixed deadline, not a sliding timeout.
-9. Append events for mutations, observations, and terminal collection. Validate with `--codex-session-dir ~/.codex/sessions` to audit native waits that bypass authorization.
-10. Recover ordinary failures in the same Worker/Attempt using canonical `record`/`authorize` recovery entries. Idle/interrupted status (including `status.type`) requires reconciliation, not success or replacement. Preserve ownership during an outage; inspect the original Worker and its grace probe before replacement.
-11. Reuse `worker_id` across `single-worker` Gates. Preflight selects continuation; send only Packet SHA, Gate, and remaining objective. An open breaker permits `--purpose inspect`, not execution. Replacements require a declared trigger.
-12. Collect a confirmed terminal outcome once, append `terminal-collected`, stop the host Automation, and persist Heartbeat status. The planner's `stop` result does not itself call the host tool.
+## Dispatch Transaction
 
-These scripts authorize and audit calls; they do not hide or proxy the host's native MCP tools. Host scheduling, connectivity, and explicit task-creation permissions still apply.
+1. Freeze the protected contract and resolve the Codex Adapter.
+2. Run dispatch from the established project PM and bind the target Run's Heartbeat there. Reuse that PM across tasks; invocation elsewhere does not transfer ownership. A visible Worker has no verified parent-wakeup callback, so use `direct` when periodic monitoring is disabled. Never target the Worker or create a monitor task.
+3. Begin provisioning with `manage_dispatch_transaction.py`, then run `dispatch_preflight.py`. Preflight validates the Packet, Heartbeat, locks, recovery state, and coordinator budget.
+   Coordinator usage is advisory. PM migration requires a prepared handoff and user approval as described in `../project-coordinator.md`.
+4. Create the visible task with `create_thread`, then complete the transaction with its real thread ID and Lease. A queued `clientThreadId` is not a Worker ID. On confirmed creation failure, pause the Heartbeat before rollback.
+5. Authorize one post-create zero-wait snapshot and persist its result with `complete_status_inspect.py`. A short terminal wait is optional and must be authorized by `authorize_terminal_wait.py`; the machine policy permits one call of at most 30 seconds per Run.
+
+Provisioning timeout, operation arguments, event ordering, and idempotency are defined by `codex.adapter.json` and enforced by the transaction, authorization, and validation scripts.
+
+## Monitoring
+
+Every 10-minute Heartbeat runs `plan_monitor_tick.py` once and performs only its returned action:
+
+- `sleep`: make no Provider call.
+- `inspect`: authorize one `wait_threads(timeoutMs=0)` snapshot, then consume that authorization with `complete_status_inspect.py --write`.
+- `reconcile-pending-inspection`: recover the missing result once or pause the Heartbeat.
+- terminal or expired provisioning: collect or roll back once, perform `required_host_action`, and pause the Automation.
+
+Do not loop, use a positive wait from Heartbeat, or issue another snapshot while an authorization is unmatched. Idle/interrupted is not success. For idle plus a completed latest turn, use the delegation's explicit terminal outcome; if it is unavailable, pause for repair instead of guessing.
+
+On monitor or network failure, keep the Attempt, Lease ownership, and locks while liveness is unknown. Inspect the original Worker after recovery. Replace it only after Provider-confirmed irrecoverability and the required grace probe.
+
+## Continue And Close
+
+Reuse a `single-worker` Worker across Gates and send only current identity, Packet SHA, remaining objective, and evidence gaps. Ordinary failures stay in the same Worker/Attempt and follow the recovery ledger.
+
+Collect a confirmed terminal outcome once. Validate Task/Runtime/Evidence before a Gate change, append `terminal-collected`, pause the host Automation, persist Heartbeat status, and report closure. Script output is a decision; host actions still must be executed.
+
+These scripts authorize and audit native calls; they do not proxy MCP tools or keep a disconnected host running.

@@ -203,6 +203,25 @@ class LivenessCase(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(second["resources"]["locks"][0]["status"], "released")
 
+    def test_idle_completed_turn_requires_explicit_terminal_outcome(self) -> None:
+        source = self.task()
+        run_id = source["runs"][0]["run_id"]
+        now = datetime(2026, 7, 13, 13, 0, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ValueError, "explicit terminal outcome"):
+            self.module.reconcile_liveness(
+                source, run_id, "idle", now, latest_turn_status="completed"
+            )
+        result, outcome = self.module.reconcile_liveness(
+            source,
+            run_id,
+            "idle",
+            now,
+            latest_turn_status="completed",
+            terminal_outcome="succeeded",
+        )
+        self.assertEqual(outcome, "terminal-succeeded")
+        self.assertEqual(result["runs"][0]["status"], "succeeded")
+
     def test_one_diagnosis_can_identify_a_legitimate_running_command(self) -> None:
         source = self.task()
         run_id = source["runs"][0]["run_id"]

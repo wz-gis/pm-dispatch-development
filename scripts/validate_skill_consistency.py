@@ -13,7 +13,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_HEARTBEAT_MINUTES = 10
 EXPECTED_PROTOCOL_VERSION = "2"
-EXPECTED_CODEX_ADAPTER_VERSION = "13"
+EXPECTED_CODEX_ADAPTER_VERSION = "15"
 EXPECTED_CODEX_WAIT_POLICY = {
     "max_calls_per_run": 1,
     "max_timeout_ms": 30000,
@@ -89,7 +89,9 @@ def validate_consistency(root: Path = ROOT) -> list[str]:
             inspect = worker.get("inspect") or {}
             wait = worker.get("wait") or {}
             if adapter.get("adapter_version") != EXPECTED_CODEX_ADAPTER_VERSION:
-                errors.append("codex.adapter.json: adapter_version must be 13")
+                errors.append("codex.adapter.json: adapter_version must be 15")
+            if monitor.get("modes") != ["heartbeat"]:
+                errors.append("codex.adapter.json: visible Workers require heartbeat-only monitoring")
             if inspect.get("target") != "wait_threads" or inspect.get("fixed_inputs") != {"timeout_ms": 0}:
                 errors.append("codex.adapter.json: inspect must be a zero-wait snapshot")
             if wait.get("target") != "wait_threads" or "timeout_ms" not in set(wait.get("input_fields") or []):
@@ -185,6 +187,7 @@ def validate_consistency(root: Path = ROOT) -> list[str]:
         "dispatch_preflight.py",
         "authorize_terminal_wait.py",
         "authorize_status_inspect.py",
+        "complete_status_inspect.py",
         "check_coordinator_budget.py",
         "manage_dispatch_transaction.py",
         "plan_monitor_tick.py",

@@ -1,6 +1,6 @@
 # Closure And Terminal Report
 
-After a Worker, Run, Attempt, or direct task reaches a terminal state, verify Task/Evidence with the Validator and proactively report the outcome. Heartbeat collection follows the same contract; "monitoring stopped" is not a closure report.
+After a Worker, Run, Attempt, or direct task reaches a terminal state, verify Task/Runtime/Evidence with the Validator before changing a Gate, then proactively report the outcome. Heartbeat collection follows the same contract; "monitoring stopped" is not a closure report.
 
 ## Gate Outcomes
 
@@ -15,6 +15,8 @@ UI/L3 requires a Browser Artifact. API/L2 requires API, SQL, or a successful Com
 ## Report Fields
 
 Use the user's language. Report the actual evidence level, never describe L2/L3 as L4. Include work actually performed, remaining gaps/blockers, environment limits, risks, required user actions, product/PM commits, and one next step. Never request or record a secret; describe the login or authorization the user must perform.
+
+A required decision must also be submitted through the available host input UI and persisted as pending under `autonomy.md`; the report's 'Your action' line alone does not collect approval. Reuse an existing pending question instead of posting it again.
 
 ```text
 <TASK_ID>: <status>; verified through <level>.

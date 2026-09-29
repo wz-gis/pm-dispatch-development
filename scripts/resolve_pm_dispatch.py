@@ -22,6 +22,7 @@ from validate_pm_dispatch import (  # noqa: E402
     runtime_file_for,
     validate_schema,
 )
+from select_codex_execution import missing_tools  # noqa: E402
 
 
 class ResolutionError(ValueError):
@@ -29,7 +30,8 @@ class ResolutionError(ValueError):
 
 
 def resolve_dispatch(
-    dispatch: dict[str, Any], adapters: dict[str, dict[str, Any]], resolved_at: str
+    dispatch: dict[str, Any], adapters: dict[str, dict[str, Any]], resolved_at: str,
+    host_tools: list[str] | dict | None = None,
 ) -> dict[str, Any]:
     provider_policy = dispatch.get("provider_policy") or {}
     fallback = dispatch.get("fallback_policy") or {}
@@ -52,6 +54,27 @@ def resolve_dispatch(
         adapter = adapters.get(provider)
         if not adapter:
             failures.append(f"{provider}: adapter is not registered")
+            continue
+
+        worker_types = adapter.get("worker_types", [])
+        if host_tools is not None:
+            missing = missing_tools(provider, host_tools, dispatch.get("required_capabilities"))
+            if missing:
+                failures.append(f"{provider}: unavailable host tools {missing}; select a supported execution path")
+                continue
+        if provider == "codex-subagent" and (dispatch.get("heartbeat_required")
+                                              or "heartbeat" in dispatch.get("required_capabilities", [])):
+            failures.append("codex-subagent: parent events cannot satisfy periodic Heartbeat monitoring")
+            continue
+        if (
+            provider == "codex"
+            and "codex-thread" in worker_types
+            and dispatch.get("heartbeat_required") is not True
+        ):
+            failures.append(
+                "codex: a visible Worker has no verified parent callback and requires "
+                "heartbeat_required=true; use direct strategy when monitoring is disabled"
+            )
             continue
 
         monitor_mode = select_monitor_mode(dispatch, adapter)
@@ -92,7 +115,6 @@ def resolve_dispatch(
             failures.append(f"{provider}: cannot map reasoning profile {profile!r}")
             continue
 
-        worker_types = adapter.get("worker_types", [])
         if not worker_types:
             failures.append(f"{provider}: no worker type is declared")
             continue
@@ -200,6 +222,7 @@ def main() -> int:
     parser.add_argument("--adapter-dir", help="Directory containing *.adapter.json")
     parser.add_argument("--schema-dir", help="Directory containing adapter.schema.json")
     parser.add_argument("--now", help="Resolution timestamp in ISO-8601")
+    parser.add_argument("--host-tools", help="JSON array of live tool names, checked before provisioning")
     parser.add_argument("--write", action="store_true", help="Write resolution back to the task file")
     args = parser.parse_args()
 
@@ -215,7 +238,8 @@ def main() -> int:
 
     task = load_structured_file(task_path)
     resolved_at = args.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    resolution = resolve_dispatch(task.get("dispatch", {}), adapters, resolved_at)
+    host_tools = json.loads(Path(args.host_tools).read_text()) if args.host_tools else None
+    resolution = resolve_dispatch(task.get("dispatch", {}), adapters, resolved_at, host_tools)
     if args.write:
         if task.get("schema_version") == "4":
             runtime_path = runtime_file_for(task_path, task, None)
@@ -223,6 +247,12 @@ def main() -> int:
                 raise ResolutionError("Task v4 requires runtime_file before resolution can be written")
             if runtime_path.exists():
                 runtime = load_structured_file(runtime_path)
+                active = [run for run in runtime.get("runs", [])
+                          if run.get("status") in {"provisioning", "queued", "running"}]
+                previous = runtime.get("resolution") or {}
+                if active and any(previous.get(key) != resolution.get(key)
+                                  for key in ("provider", "worker_type", "monitor_mode")):
+                    raise ResolutionError("cannot change execution path while a Run is active")
             else:
                 runtime = {
                     "schema_version": "1",

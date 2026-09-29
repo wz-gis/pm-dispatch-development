@@ -19,6 +19,7 @@ from tests.test_validate_pm_dispatch import (
 ROOT = Path(__file__).resolve().parents[1]
 AUTHORIZE = ROOT / "scripts" / "authorize_status_inspect.py"
 PLANNER = ROOT / "scripts" / "plan_monitor_tick.py"
+COMPLETER = ROOT / "scripts" / "complete_status_inspect.py"
 NOW = "2026-07-13T12:00:00Z"
 
 
@@ -45,6 +46,7 @@ class StatusInspectionCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.authorizer = load_module("pm_status_inspect", AUTHORIZE)
         cls.planner = load_module("pm_monitor_tick", PLANNER)
+        cls.completer = load_module("pm_complete_status_inspect", COMPLETER)
         cls.adapter = json.loads(
             (ROOT / "references" / "adapters" / "codex.adapter.json").read_text()
         )
@@ -100,13 +102,27 @@ class StatusInspectionCase(unittest.TestCase):
                     cycle_id="cycle-001",
                     now="2026-07-13T12:00:01Z",
                 )
-            with self.assertRaisesRegex(ValueError, "debounced"):
+            with self.assertRaisesRegex(ValueError, "no persisted status-observed"):
                 self.authorize(
                     path,
                     event_id="inspect-003",
                     cycle_id="cycle-002",
                     now="2026-07-13T12:09:59Z",
                 )
+            event = {
+                "schema_version": "1",
+                "event_id": "observed-001",
+                "event_type": "status-observed",
+                "task_id": "SPEC-101",
+                "occurred_at": "2026-07-13T12:00:01Z",
+                "run_id": "run-SPEC-101-impl-w01",
+                "attempt_id": "attempt-SPEC-101-impl-w01-a01",
+                "provider": "codex",
+                "worker_id": "codex-thread:thread-1",
+                "payload": {"authorization_event_id": "inspect-001"},
+            }
+            with (Path(directory) / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event) + "\n")
             allowed = self.authorize(
                 path,
                 event_id="inspect-004",
@@ -152,6 +168,14 @@ class StatusInspectionCase(unittest.TestCase):
                 now=NOW,
                 reason="post-create",
             )
+            event = {
+                "event_type": "status-observed",
+                "run_id": "run-SPEC-101-impl-w01",
+                "occurred_at": "2026-07-13T12:00:01Z",
+                "payload": {"authorization_event_id": "inspect-001"},
+            }
+            with (Path(directory) / "events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event) + "\n")
             events = self.planner.load_events(Path(directory) / "events.jsonl")
             now = self.planner.parse_time(NOW)
             early = self.planner.plan_monitor_tick(
@@ -162,6 +186,70 @@ class StatusInspectionCase(unittest.TestCase):
             )
             self.assertEqual(early["action"], "sleep")
             self.assertEqual(due["action"], "inspect")
+
+    def test_planner_never_reauthorizes_an_unreconciled_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path, runtime = self.make_runtime(Path(directory))
+            self.authorize(
+                path,
+                event_id="inspect-001",
+                cycle_id="cycle-001",
+                now=NOW,
+                reason="post-create",
+            )
+            events = self.planner.load_events(Path(directory) / "events.jsonl")
+            result = self.planner.plan_monitor_tick(
+                runtime, events, now=self.planner.parse_time(NOW) + timedelta(minutes=30)
+            )
+            self.assertEqual(result["action"], "reconcile-pending-inspection")
+            self.assertEqual(result["authorization_event_id"], "inspect-001")
+            self.assertFalse(result["resume_allowed"])
+
+    def test_completion_closes_idle_completed_worker_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path, _ = self.make_runtime(root)
+            self.authorize(
+                path,
+                event_id="inspect-001",
+                cycle_id="cycle-001",
+                now=NOW,
+                reason="post-create",
+            )
+            result = self.completer.complete_inspection(
+                path,
+                authorization_event_id="inspect-001",
+                event_id="observed-001",
+                probe_status="idle",
+                latest_turn_status="completed",
+                terminal_outcome="succeeded",
+                event_cursor="cursor-2",
+                occurred_at="2026-07-13T12:00:01Z",
+                event_schema=self.event_schema,
+                write=True,
+            )
+            self.assertEqual(result["outcome"], "terminal-succeeded")
+            self.assertEqual(
+                result["required_host_action"],
+                "collect-once-then-pause-heartbeat",
+            )
+            runtime = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(runtime["runs"][0]["status"], "succeeded")
+            events = self.planner.load_events(root / "events.jsonl")
+            self.assertEqual(events[-1]["payload"]["authorization_event_id"], "inspect-001")
+            with self.assertRaisesRegex(ValueError, "already consumed"):
+                self.completer.complete_inspection(
+                    path,
+                    authorization_event_id="inspect-001",
+                    event_id="observed-002",
+                    probe_status="succeeded",
+                    latest_turn_status=None,
+                    terminal_outcome=None,
+                    event_cursor=None,
+                    occurred_at="2026-07-13T12:00:02Z",
+                    event_schema=self.event_schema,
+                    write=True,
+                )
 
     def test_model_free_planner_rejects_missing_event_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

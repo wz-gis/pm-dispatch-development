@@ -125,11 +125,24 @@ def authorize_terminal_wait(
     adapter: dict[str, Any],
     event_schema: dict[str, Any],
     write: bool,
+    host_tools: list[str] | dict | None = None,
 ) -> dict[str, Any]:
     runtime = load_structured_file(runtime_path)
     run = find_active_run(runtime, run_id)
+    if adapter.get("provider") != run.get("provider"):
+        raise TerminalWaitAuthorizationError("wait Adapter differs from Run provider")
+    internal = run.get("provider") == "codex-subagent"
     budget = validate_wait_budget(run, timeout_ms, source)
-    validate_heartbeat(runtime, run_id)
+    if internal:
+        if (runtime.get("resolution") or {}).get("monitor_mode") != "milestone" or runtime.get("heartbeat"):
+            raise TerminalWaitAuthorizationError("native agent wait requires milestone monitoring without Heartbeat")
+    else:
+        validate_heartbeat(runtime, run_id)
+    inputs = {"worker_id": str(run["worker_id"]), "timeout_ms": timeout_ms}
+    if run.get("event_cursor") and not internal:
+        inputs["event_cursor"] = run["event_cursor"]
+    # Validate the native timeout before consuming the durable budget.
+    envelope = build_invocation(adapter, "wait", inputs, source=source, host_tools=host_tools)
     occurred = parse_time(occurred_at)
     enforced_at = parse_time(budget.get("enforced_at"))
     if occurred < enforced_at:
@@ -152,7 +165,7 @@ def authorize_terminal_wait(
         "occurred_at": occurred_at,
         "run_id": run_id,
         "attempt_id": active_attempts[0].get("attempt_id"),
-        "provider": "codex",
+        "provider": run["provider"],
         "worker_id": worker_id,
         "payload": {
             "source": source,
@@ -198,7 +211,7 @@ def authorize_terminal_wait(
             and (existing.get("payload") or {}).get("timeout_ms") == 0
             and (existing.get("payload") or {}).get("source") == "coordinator"
         ]
-        if not snapshots:
+        if not snapshots and not internal:
             raise TerminalWaitAuthorizationError(
                 "terminal wait requires a recorded coordinator zero-wait snapshot"
             )
@@ -208,17 +221,13 @@ def authorize_terminal_wait(
             stream.flush()
             os.fsync(stream.fileno())
 
-    inputs = {"worker_id": worker_id, "timeout_ms": timeout_ms}
-    if event_cursor:
-        inputs["event_cursor"] = event_cursor
-    envelope = build_invocation(adapter, "wait", inputs, source=source)
     native_target: dict[str, Any] = {"threadId": worker_id}
     if event_cursor:
         native_target["afterCursor"] = event_cursor
     return {
         "authorization": event,
         "adapter_envelope": envelope,
-        "native_arguments": {
+        "native_arguments": envelope.get("native_arguments") or {
             "targets": [native_target],
             "timeoutMs": timeout_ms,
         },
@@ -237,11 +246,17 @@ def main() -> int:
     parser.add_argument("--event-id", required=True)
     parser.add_argument("--now", help="Authorization time; defaults to current UTC")
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--host-tools", help="Live tool inventory with verified native bindings")
     args = parser.parse_args()
 
     runtime_path = resolve_runtime_path(Path(args.document).resolve())
     root = SCRIPT_DIR.parent
-    adapter = load_structured_file(root / "references" / "adapters" / "codex.adapter.json")
+    runtime = load_structured_file(runtime_path)
+    run = find_active_run(runtime, args.run_id)
+    provider = run.get("provider")
+    if provider not in {"codex", "codex-subagent"}:
+        raise TerminalWaitAuthorizationError("unsupported wait provider")
+    adapter = load_structured_file(root / "references" / "adapters" / f"{provider}.adapter.json")
     event_schema = load_structured_file(root / "references" / "schemas" / "runtime-event.schema.json")
     assert_supported_schema(event_schema, "runtime-event.schema.json")
     occurred_at = args.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -255,6 +270,7 @@ def main() -> int:
         adapter=adapter,
         event_schema=event_schema,
         write=args.write,
+        host_tools=json.loads(Path(args.host_tools).read_text()) if args.host_tools else None,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

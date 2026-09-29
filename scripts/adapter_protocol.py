@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from select_codex_execution import native_bindings  # noqa: E402
+
 
 class AdapterProtocolError(ValueError):
     """Raised when an Adapter operation cannot be built or decoded safely."""
@@ -20,6 +26,7 @@ def build_invocation(
     inputs: dict[str, Any],
     idempotency_key: str | None = None,
     source: str = "coordinator",
+    host_tools: list[str] | dict | None = None,
 ) -> dict[str, Any]:
     if adapter.get("protocol_version") != "2":
         raise AdapterProtocolError(
@@ -29,6 +36,8 @@ def build_invocation(
     operation = worker.get(operation_name)
     if not isinstance(operation, dict):
         raise AdapterProtocolError(f"unknown worker operation {operation_name!r}")
+    if operation.get("supported") is False:
+        raise AdapterProtocolError(f"{operation_name} is not supported by this Adapter; use received events")
 
     required = list(operation.get("input_fields", []))
     optional = list(operation.get("optional_input_fields", []))
@@ -97,12 +106,51 @@ def build_invocation(
     }
     if idempotency_key:
         envelope["idempotency_key"] = idempotency_key
+    if adapter.get("provider") == "codex-subagent":
+        worker_id = inputs.get("worker_id")
+        if operation_name == "create":
+            native = {"message": inputs["prompt"]}
+        elif operation_name == "send":
+            native = {"target": worker_id, "message": inputs["prompt"]}
+            if "interrupt" in inputs:
+                native["interrupt"] = inputs["interrupt"]
+        elif operation_name == "wait":
+            timeout = inputs["timeout_ms"]
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or not 10000 <= timeout <= 30000:
+                raise AdapterProtocolError("native agent wait requires 10000..30000 ms")
+            native = {"targets": [worker_id], "timeout_ms": timeout}
+        else:
+            native = {"target": worker_id}
+        if host_tools is not None:
+            binding = native_bindings(host_tools)[0].get(operation_name)
+            if not binding or binding.get("needs_schema_binding"):
+                raise AdapterProtocolError(f"{operation_name} has no verified host binding")
+            fields = binding["input_map"]
+            if set(inputs) - set(fields):
+                raise AdapterProtocolError(f"{operation_name} host does not map inputs {sorted(set(inputs) - set(fields))}")
+            native = {fields[key]: [value] if key in binding["list_inputs"] else value
+                      for key, value in inputs.items()}
+            envelope["target"] = binding["tool"]
+        envelope["native_arguments"] = native
     return envelope
 
 
 def extract_operation_result(
-    adapter: dict[str, Any], operation_name: str, payload: dict[str, Any]
+    adapter: dict[str, Any], operation_name: str, payload: dict[str, Any],
+    worker_id: str | None = None,
+    host_tools: list[str] | dict | None = None,
 ) -> dict[str, Any]:
+    if adapter.get("provider") == "codex-subagent":
+        require_submission = True
+        if host_tools is not None:
+            binding = native_bindings(host_tools)[0].get("wait" if operation_name == "collect" else operation_name)
+            if binding and not binding.get("needs_schema_binding"):
+                normalized = dict(payload)
+                for key, path in binding["result_paths"].items():
+                    normalized["agent_id" if key == "worker_id" else key] = extract_path(payload, path)
+                payload = normalized
+                require_submission = binding["tool"].rsplit("__", 1)[-1].rsplit(".", 1)[-1] == "send_input"
+        return extract_subagent_result(operation_name, payload, worker_id, require_submission)
     operation = adapter.get("components", {}).get("worker", {}).get(operation_name)
     if not isinstance(operation, dict):
         raise AdapterProtocolError(f"unknown worker operation {operation_name!r}")
@@ -125,6 +173,48 @@ def extract_operation_result(
         path = result_paths.get(field)
         result[field] = extract_optional_path(payload, path)
     return result
+
+
+def extract_subagent_result(operation: str, payload: dict[str, Any], worker_id: str | None,
+                            require_submission: bool = True) -> dict[str, Any]:
+    result = {"worker_id": worker_id, "status": "unknown", "continuation_token": None,
+              "event_cursor": None, "delegation": None, "requires_reconciliation": True}
+    if operation == "create":
+        if not isinstance(payload.get("agent_id"), str) or not payload["agent_id"]:
+            raise AdapterProtocolError("create result did not contain an agent_id")
+        return result | {"worker_id": payload["agent_id"], "status": "queued",
+                         "requires_reconciliation": False}
+    if not worker_id:
+        raise AdapterProtocolError("native result decoding requires --worker-id")
+    if operation == "send":
+        if require_submission and not payload.get("submission_id"):
+            raise AdapterProtocolError("send result requires submission_id")
+        return result | {"submission_id": payload.get("submission_id"), "receipt": payload}
+    if operation == "cancel":
+        # close_agent returns the PREVIOUS status, not proof of completed shutdown.
+        return result | {"previous_status": payload.get("previous_status")}
+    if operation not in {"wait", "collect"}:
+        raise AdapterProtocolError(f"native agent operation {operation!r} is unsupported")
+    statuses = payload.get("status")
+    if not isinstance(statuses, dict):
+        raise AdapterProtocolError("native completion requires status keyed by agent id")
+    raw = statuses.get(worker_id)
+    if raw is None:
+        if payload.get("timed_out") is True:
+            return result
+        raise AdapterProtocolError("native completion does not match the requested agent id")
+    if isinstance(raw, dict) and "completed" in raw:
+        return result | {"status": "succeeded", "delegation": raw["completed"],
+                         "requires_reconciliation": False, "requires_acceptance": True}
+    if isinstance(raw, dict) and "errored" in raw:
+        return result | {"status": "failed", "delegation": raw["errored"],
+                         "requires_reconciliation": False}
+    if isinstance(raw, str) and raw in {"pending_init", "running", "shutdown"}:
+        return result | {"status": {"pending_init": "queued", "running": "running",
+                                    "shutdown": "cancelled"}[raw], "requires_reconciliation": False}
+    if raw in ("interrupted", "not_found"):
+        return result
+    raise AdapterProtocolError(f"unmapped native agent status {raw!r}")
 
 
 def normalize_status(adapter: dict[str, Any], raw_status: Any) -> str:
@@ -174,11 +264,14 @@ def main() -> int:
         help="Invocation source used by operation call policy",
     )
     parser.add_argument("--result", help="Optional provider result JSON to decode")
+    parser.add_argument("--worker-id", help="Agent id for decoding native status maps")
+    parser.add_argument("--host-tools", help="Live tool inventory with verified native argument bindings")
     args = parser.parse_args()
 
     adapter = json.loads(Path(args.adapter).read_text(encoding="utf-8"))
+    host_tools = json.loads(Path(args.host_tools).read_text()) if args.host_tools else None
     if args.result is not None:
-        output = extract_operation_result(adapter, args.operation, json.loads(args.result))
+        output = extract_operation_result(adapter, args.operation, json.loads(args.result), args.worker_id, host_tools)
     else:
         output = build_invocation(
             adapter,
@@ -186,6 +279,7 @@ def main() -> int:
             json.loads(args.inputs),
             args.idempotency_key,
             args.source,
+            host_tools,
         )
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0

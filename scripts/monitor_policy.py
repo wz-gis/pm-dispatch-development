@@ -14,6 +14,27 @@ PROVISIONING_DEFAULT_TTL_SECONDS = 120
 PROVISIONING_MAX_TTL_SECONDS = 300
 
 
+def pending_inspection_authorizations(
+    events: list[dict[str, Any]], run_id: str
+) -> list[dict[str, Any]]:
+    """Return status snapshot permits that have no persisted observation."""
+    authorizations = [
+        event
+        for event in events
+        if event.get("event_type") == "status-inspect-authorized"
+        and event.get("run_id") == run_id
+    ]
+    observed = {
+        str((event.get("payload") or {}).get("authorization_event_id") or "")
+        for event in events
+        if event.get("event_type") == "status-observed"
+        and event.get("run_id") == run_id
+    }
+    return [
+        event for event in authorizations if str(event.get("event_id") or "") not in observed
+    ]
+
+
 def inspection_policy_applies(run: dict[str, Any]) -> bool:
     if run.get("provider") != "codex":
         return False

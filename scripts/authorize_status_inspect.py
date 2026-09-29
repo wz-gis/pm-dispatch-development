@@ -23,6 +23,7 @@ from monitor_policy import (  # noqa: E402
     INSPECTION_MIN_INTERVAL_SECONDS,
     INSPECTION_POLICY_NAME,
     inspection_policy_applies,
+    pending_inspection_authorizations,
 )
 from record_runtime_event import resolve_runtime_path  # noqa: E402
 from validate_pm_dispatch import (  # noqa: E402
@@ -92,15 +93,15 @@ def authorize_status_inspect(
     if not worker_id:
         raise StatusInspectAuthorizationError("status inspection requires worker_id")
     if not inspection_policy_applies(run):
-        raise StatusInspectAuthorizationError("Run does not use the Codex v13 inspection policy")
+        raise StatusInspectAuthorizationError("Run does not use the Codex v13+ inspection policy")
     budget = run.get("inspection_budget")
     if not isinstance(budget, dict) or budget.get("policy") != INSPECTION_POLICY_NAME:
-        raise StatusInspectAuthorizationError("Codex v13 Run requires inspection_budget")
+        raise StatusInspectAuthorizationError("Codex v13+ Run requires inspection_budget")
     if (
         budget.get("min_interval_seconds") != INSPECTION_MIN_INTERVAL_SECONDS
         or budget.get("max_calls_per_cycle") != INSPECTION_MAX_CALLS_PER_CYCLE
     ):
-        raise StatusInspectAuthorizationError("Run inspection_budget differs from Codex v13 policy")
+        raise StatusInspectAuthorizationError("Run inspection_budget differs from Codex v13+ policy")
     if reason not in REASONS:
         raise StatusInspectAuthorizationError(f"unsupported inspection reason {reason!r}")
     if source == "heartbeat" and reason not in {"scheduled", "lease-risk"}:
@@ -170,6 +171,12 @@ def authorize_status_inspect(
         if used_in_cycle >= int(budget["max_calls_per_cycle"]):
             raise StatusInspectAuthorizationError(
                 f"inspection cycle {cycle_id!r} already consumed its budget"
+            )
+        pending = pending_inspection_authorizations(events, run_id)
+        if pending:
+            raise StatusInspectAuthorizationError(
+                "previous status inspection has no persisted status-observed result: "
+                f"{pending[-1].get('event_id')}; reconcile it before another snapshot"
             )
         if reason == "scheduled" and prior:
             elapsed = (occurred - parse_time(prior[-1].get("occurred_at"))).total_seconds()

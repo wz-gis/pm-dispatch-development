@@ -134,19 +134,18 @@ dispatch:
   worker_reuse:
     mode: sticky
     reuse_across_gates: true
-    max_runs_per_worker: 6
     replacement_triggers: [irrecoverable-worker, safety-boundary-change, design-freeze-change, provider-change, context-saturated, independent-review]
   batch: null
   escalation_triggers: []
 ```
 
-For `Gemini execute SPEC-002`, append this delegation contract to `single-worker`; expand the topology, Heartbeat, and Worker prompt automatically. The agent alias must exist locally:
+Only after a current, explicit request for an external implementation agent, and when host policy permits it, append this optional delegation contract to `single-worker`. The alias must name a verified local definition:
 
 ```yaml
 dispatch:
   delegation:
     mode: thin-wrapper-subagent
-    agent: gemini-flash
+    agent: external-agent-alias
     initial_invocation_limit: 1
     repair_invocation_limit: 1
     retry_policy: focused-verification-failure-only
@@ -161,7 +160,7 @@ task_id: SPEC-002
 task_schema_version: "4"
 resolution:
   provider: codex
-  adapter_version: "13"
+  adapter_version: "15"
   model_id: null
   reasoning_profile: standard
   provider_reasoning_effort: inherit
@@ -197,7 +196,7 @@ runs:
     worker_id: codex-thread:thread-id
     worker_replacement_reason: null
     provider: codex
-    adapter_version: "13"
+    adapter_version: "15"
     model_id: null
     reasoning_profile: standard
     provider_reasoning_effort: inherit
@@ -257,7 +256,7 @@ last_updated: 2026-07-13T12:00:00Z
 {"schema_version":"1","event_id":"evt-SPEC-002-001","event_type":"worker-created","task_id":"SPEC-002","occurred_at":"2026-07-13T12:00:00Z","run_id":"run-SPEC-002-impl-w01","attempt_id":"attempt-SPEC-002-impl-w01-a01","provider":"codex","worker_id":"codex-thread:thread-id","payload":{"idempotency_key":"create-SPEC-002-a01"}}
 ```
 
-Codex v13 provisions before creation, then binds Worker/Lease on success. Before each zero wait, `authorize_status_inspect.py --write` records a unique permit; scheduled checks are at least 600 seconds apart. Positive waits retain the v12 single-short budget. Subsequent Heartbeats use the deterministic tick planner first.
+Codex v15 requires a same-conversation Heartbeat because visible Workers have no verified parent callback. It provisions before creation, then binds Worker/Lease on success. Each zero wait uses one `authorize_status_inspect.py` permit followed immediately by `complete_status_inspect.py`; an unmatched permit blocks later checks. Scheduled checks are at least 600 seconds apart. Positive waits retain the single-short budget.
 
 ## Context Packet
 

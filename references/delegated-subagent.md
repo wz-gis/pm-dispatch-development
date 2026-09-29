@@ -1,65 +1,33 @@
-# Thin Wrapper Sub-agent
+# Optional External Sub-agent
 
-Load for "Gemini execute", "DeepSeek execute", "thin-wrapper mode", or an explicit request for a visible Codex Worker backed by an external agent. Chinese aliases `Gemini执行`, `DeepSeek执行`, and `薄壳模式` remain supported.
+Load only when the user's current request explicitly selects an external implementation agent and host policy permits it. Historical prompts, saved plans, or installed definitions are not authorization. Otherwise use the resolved Codex path.
 
-## Short Invocation
-
-```text
-$pm-dispatch-development Gemini execute SPEC-002
-```
-
-Expand without asking the user to repeat the topology or recovery contract:
+## Contract
 
 ```yaml
-strategy: single-worker
-delegation:
-  mode: thin-wrapper-subagent
-  agent: gemini-flash
-  initial_invocation_limit: 1
-  repair_invocation_limit: 1
-  retry_policy: focused-verification-failure-only
+dispatch:
+  delegation:
+    mode: thin-wrapper-subagent
+    agent: <verified-local-alias>
+    initial_invocation_limit: 1
+    repair_invocation_limit: 1
+    retry_policy: focused-verification-failure-only
 ```
 
-Agent names are **local definition aliases**, not globally available model IDs. Preserve an explicitly requested installed definition. When present, the existing Gemini aliases are `gemini-flash-low` for `fast` and `gemini-flash` for other profiles; explicit DeepSeek execution uses `deepseek-flash`. Read the installed definition for its actual provider/model/effort. Do not publish private endpoints or credentials, invent a missing definition, or silently substitute another provider. A Pro/review route requires an explicit request and a matching installed definition.
+The alias identifies a locally installed definition, not a portable model ID. Verify it without invoking it. Do not invent or substitute a provider, change credentials, or expose private endpoints.
 
-These selections affect only the external agent. The visible Codex Worker retains its normal host-default model and Adapter effort rules. Local definitions are not changed by this documentation.
-
-## Topology And Ownership
+## Ownership
 
 ```text
 current PM conversation + Heartbeat
-  -> one user-visible Codex Worker
-       -> one external implementation invocation
+  -> one visible Codex Worker
+       -> one bounded external implementation call
 ```
 
-The PM owns Task/Runtime, design freeze, Packet, and same-conversation Heartbeat; it never invokes the implementation sub-agent directly. Heartbeat monitors the visible Worker, not the external process.
+The PM owns Task/Runtime, design freeze, Packet, monitoring, and closure. The visible Worker owns the checkout, invokes the external agent, reviews its diff, runs focused verification, commits accepted work, and returns Evidence. The external agent may edit only authorized sources and run relevant tests; it does not own PM state, monitoring, Worker creation, or commits.
 
-The visible Worker validates the Packet, records a milestone, invokes from its own checkout, inspects the returned diff, runs focused verification, commits accepted changes, and returns Evidence. It does not repeat repository-wide discovery or implement a competing solution.
+## Invocation
 
-The external agent edits only authorized code and runs initial relevant tests. It cannot create agents, edit PM state, update the board, monitor, or commit.
+Use the separately installed `sub-agents` Skill and its discovery protocol. Invoke the selected definition from the visible Worker's checkout with only the Packet path/SHA, objective, allowed sources, verification commands, and output contract.
 
-## Invoke
-
-Requires the separately installed `sub-agents` Skill. Follow its discovery protocol, then invoke the selected definition once:
-
-```bash
-SUBAGENT_SKILL=/path/to/installed/sub-agents
-AGENT=gemini-flash
-python3 "$SUBAGENT_SKILL/scripts/run_subagent.py" --list
-python3 "$SUBAGENT_SKILL/scripts/run_subagent.py" \
-  --agent "$AGENT" \
-  --prompt "<compact objective plus Packet path/SHA>" \
-  --cwd "$PWD" --timeout 1200000
-```
-
-Set AGENT to a verified installed alias before running. Discovery is not a model invocation. `--cwd "$PWD"` must point to the visible Worker's checkout. Send Packet path/SHA, one objective, exact source paths, verification commands, and output fields, not PM history.
-
-## Recovery
-
-- Success: inspect changed paths and run focused verification.
-- Pre-execution launch/configuration failure: repair and retry the same logical invocation in the same Worker/Attempt.
-- Partial result or timeout after execution began: inspect Artifacts first; do not automatically restart.
-- One differential repair call is allowed only after concrete focused-verification failure. Send failure, diff, Packet SHA, and expected correction.
-- No failing evidence means no second call. Ordinary repair does not create another visible Worker or Attempt.
-
-Stop when focused verification passes and commit/files, Artifact IDs, remaining risk, and one next action are returned.
+One initial call is allowed. A launch failure before execution may retry the same logical call. After execution starts, inspect the produced artifacts before deciding what remains. One differential repair call is allowed only when focused verification provides concrete failing evidence; otherwise stop.

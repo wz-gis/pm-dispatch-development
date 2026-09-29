@@ -1,76 +1,81 @@
 ---
 name: pm-dispatch-development
-description: Coordinate bug fixes and feature delivery with task boards, recoverable Workers, evidence-based gates, and bounded monitoring.
+description: Coordinate multi-step bug fixes and feature delivery when work needs recoverable ownership, dependencies, monitoring, and evidence-based acceptance.
 ---
 
 # PM Dispatch Development
 
-Task/Evidence are authoritative; Workers recoverable. Gate updates need validated Evidence. Use the user's language; preserve keys/IDs.
+Use for delivery that needs persistent Task/Runtime/Evidence records or a visible Worker. Handle small, low-risk work directly. Task and Evidence are authoritative; explain results in the user's language while preserving machine keys and IDs.
 
-## Fast Execution
+## Contract
 
-1. Use the lowest sufficient model/effort allowed by the selected Adapter.
-2. Without new evidence, do not expand exploration or repeat checks.
-3. Implement once evidence is sufficient.
-4. Verify correctness-critical paths and necessary regressions.
-5. Do not expand scope for hypothetical future risks.
-6. Stop after key checks pass unless new evidence appears.
+Derive the task goal, project, scope, risk, acceptance, and evidence needs from the request and repository. Ask only when missing information materially affects a costly or irreversible outcome.
 
-Proceed with reversible work; stop only for hard Blockers. Except: high risk, security, data consistency.
+Managed delivery must produce:
 
-## Load Only What You Need
+- valid Task v4 intent with dependencies, checks, and one next action;
+- Runtime v1 ownership for Worker execution: Run/Attempt/Lease, locks, applicable monitoring, and events;
+- Evidence v2 artifacts supporting the claimed L0-L4 level and triggered quality checks;
+- a terminal report with status, evidence, gaps, user action, commits, and one next step.
 
-- Boards: `render_task_panel.py --view actionable`; layout in `references/task-panel.md`.
-- Records/Validator issues: `references/core-contract.md` and relevant Schema.
-- Uncertainty/recovery/Blockers: `references/autonomy.md`.
-- Examples: `references/task-examples.md`; prompts: `references/prompts.md`.
-- Gemini/DeepSeek execution ("Gemini执行"/"DeepSeek执行"): `references/delegated-subagent.md`.
-- Read-only: `references/delegated-read.md`; no Task/Run/Heartbeat.
-- Dispatch: run Resolver/Adapter, validate Packet; no raw JSON by default. Codex: `references/adapters/codex.md`; others: `references/adapters/generic.md`.
-- Token issues: `references/context-budget.md`; terminal reporting: `references/closure.md`.
-- Skill edits: tests, consistency checks, `quick_validate.py`. Never inject README into Workers.
+Never claim a Gate from prose, an unverified status, or a passing build alone.
 
-Machine contracts: Task v4 / Runtime v1 / Evidence v2; Task v3 is read/migrate only.
-
-## Naming And Strategy
-
-Display: `BUG-001 P1 API Fix pagination`; execution IDs: `BUG-001-impl-w01`, `run-...`, and `attempt-...-a01`. Prefixes: BUG, SPEC, ONBOARD, RELEASE, ENV, CHORE.
+## Strategy
 
 - `direct`: low-risk work in this conversation.
-- `single-worker`: one task-sticky Worker reused across Gates.
-- `batch-worker`: one Worker for 2-4 related tasks in the same project/Gate.
-- `full-dispatch`: serial high-risk, cross-project delivery.
+- `single-worker`: one task-sticky Worker across implementation, repair, integration, and verification.
+- `batch-worker`: one Worker for 2-4 related tasks in the same project and Gate, with separate conclusions.
+- `full-dispatch`: ordered coordination for high-risk, cross-repository, dependent, or resource-conflicting work.
 
-Choose the lightest verifiable strategy; escalate owner/repository/resource conflicts.
+Use the lightest strategy that can produce the required evidence. A Worker must provide enough isolation, continuity, ownership, or background value to justify its setup cost.
 
 ## Workflow
 
 1. **Inspect**
-   - Read panels/Packets, then referenced sources. Full reads need a protected trigger. Check Git before edits.
+   - Start with the actionable panel or current Packet; read only sources needed for the decision. Check relevant Git state before editing.
 
 2. **Define**
-   - Record type, priority, area, strategy, effort, capabilities, user path/runtime, L0-L4 evidence, checks, stop conditions.
-   - Freeze/fingerprint scope, visible contracts, safety constraints, and acceptance before dispatch. Methods, files, commands, and ordinary test failures do not change it.
+   - Record scope, user path/runtime, acceptance, evidence levels, risk-scaled checks, dependencies, locks, and stop conditions.
+   - Before dispatch, freeze scope, visible behavior, safety constraints, and acceptance. Leave implementation choices and ordinary repair to the executor.
 
-3. **Check Safety**
-   - Validate before batch/parallel dispatch. Dependency, lock, concurrency, Attempt, or Lease errors block only the affected action.
-   - Ordinary failure stays in the same Worker/Attempt: record, repair, verify once.
-   - Use the task's canonical `manage_recovery_ledger.py`: `record` the first failure, `authorize` before retries. Limits: 2 same-method failures, 3 failed paths. An open breaker blocks execution, not inspection; resets need changed-state evidence.
+3. **Prepare**
+   - Run Resolver and Preflight to validate the Adapter, Packet provenance, capabilities, budgets, ownership, recovery state, and concurrency.
+   - Use one PM conversation per project for the panel, dispatch, and monitoring. Reuse the established PM; invoking the Skill elsewhere does not change ownership. See `references/project-coordinator.md`.
+   - Choose the Codex execution path from live tools using `references/adapters/codex-routing.md`; internal agents and visible threads are distinct. Visible threads require the PM's Heartbeat. PM replacement requires a handoff and user approval.
+   - External delegation is inactive by default. It requires an explicit current request and compatible host policy; history and saved prompts are not authorization.
 
-4. **Dispatch**
-   - Resolve `resolution`; Task does not accept model IDs. Codex omits `model` and uses the dispatch host default, not a temporary parent override; profiles map effort only.
-   - This conversation is the sole PM Coordinator. Activate its Heartbeat before Worker creation; never target a Worker or create a second monitor task.
-   - Codex v13: `manage_dispatch_transaction.py begin` allows 120 seconds to provision. `dispatch_preflight.py` validates Packet/Coordinator budget; saturation blocks only new Workers.
-   - Explicit SPEC/BUG dispatch uses `create_thread` for a visible Worker (`direct`: none; batch: one). Complete the transaction with ID/Lease; on failure stop Heartbeat, then roll back.
-   - With `dispatch.delegation`, only the visible Worker invokes the selected external agent.
-   - Authorize the post-create zero-wait snapshot with `authorize_status_inspect.py`. Positive waits need `authorize_terminal_wait.py`: at most one 30-second wait per Run, never re-armed.
-   - Every 10 minutes, this Heartbeat runs `plan_monitor_tick.py`: authorize one zero-wait snapshot for `inspect`, then persist `reconcile_worker_liveness.py` once. `sleep`/unchanged stops. No loops or positive waits.
-   - Idle/interrupted is not completion. `diagnosis-required` gets one focused check; `awaiting-diagnosis` never auto-resumes. See `autonomy.md` for long commands.
-   - On outage, mark liveness unknown and retain ownership. Reconcile the original Worker first; replace only after confirmed irrecoverability and a failed grace probe.
-   - `single-worker` reuses `worker_id` across Gates; replacement requires a declared reason. Only safety-boundary or protected-freeze changes create a new Attempt.
-   - Validate Packet sources/budgets. Reuse selects continuation: Packet SHA, Gate, remaining objective only; no full-scope fallback.
+4. **Execute And Recover**
+   - Send the validated Packet, objective, allowed sources, checks, and output contract.
+   - Reuse the original Worker and Attempt for ordinary failures; Run count is not a replacement trigger. Obey the recovery ledger; only protected-contract or safety-boundary changes create a new Attempt.
+   - On outage, retain ownership with unknown liveness. Replace a Worker only after Adapter-defined irrecoverability checks.
+   - Record meaningful milestones and one terminal delegation. Without new evidence, do not repeat discovery, checks, prompts, or monitoring.
 
 5. **Verify And Close**
-   - Collect commit/file, command, API/SQL/browser, quality-check, and release artifacts. L0-L4 reference Artifact IDs.
-   - Validator computes required/conditional checks and validates Evidence before Gate updates. Ordinary failures remain in the current Attempt.
-   - Follow `references/closure.md`: report status, evidence, gaps, user action, commits, and one next step.
+   - Run checks triggered by the changed surface and acceptance; reuse valid unaffected evidence.
+   - Validate Task, Runtime, and Evidence before a Gate change or terminal-success report.
+   - Stop the Heartbeat when the Run is terminal or cannot be reconciled safely, then follow `references/closure.md`.
+
+## Boundaries
+
+- Preserve user changes and stay within authorized repositories, files, and external side effects.
+- Do not request, expose, or persist secrets or unnecessary personal data. The user performs login, 2FA, CAPTCHA, payment, and other protected actions.
+- Require explicit authorization for irreversible, production, financial, destructive-data, or permission-changing actions.
+- Do not fabricate status, progress, evidence, usage, or verification.
+- Dependency, lock, Lease, recovery-breaker, and Validator failures block only the action they protect.
+- A first tool, build, or test failure is recoverable, not a hard Blocker.
+- For a required user decision, use the host's available input UI and persist the pending action; follow `references/autonomy.md`. Do not leave approval requests only in a final report.
+
+## Read On Demand
+
+- State, locks, and Gate invariants: `references/core-contract.md` and the relevant Schema.
+- Codex routing: `references/adapters/codex-routing.md`.
+- Other execution environments: `references/adapters/generic.md`.
+- Recovery and Blockers: `references/autonomy.md`.
+- Context/token controls: `references/context-budget.md`.
+- Prompt templates: `references/prompts.md`.
+- Record examples: `references/task-examples.md`.
+- Panel layout: `references/task-panel.md`.
+- Closure: `references/closure.md`.
+- Explicit external delegation: `references/delegated-subagent.md`.
+
+Use `render_task_panel.py --view actionable` for boards and `validate_pm_dispatch.py` before protected transitions. Schemas, Adapters, and Validators take precedence over examples.

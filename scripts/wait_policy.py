@@ -13,6 +13,8 @@ CODEX_WAIT_MAX_TIMEOUT_MS = 30_000
 
 
 def codex_wait_policy_applies(run: dict[str, Any]) -> bool:
+    if run.get("provider") == "codex-subagent":
+        return True
     if run.get("provider") != "codex":
         return False
     try:

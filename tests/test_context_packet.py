@@ -216,7 +216,7 @@ class ContextPacketCase(unittest.TestCase):
             task = json.loads(task_path.read_text(encoding="utf-8"))
             task["dispatch"]["delegation"] = {
                 "mode": "thin-wrapper-subagent",
-                "agent": "gemini-flash-medium",
+                "agent": "external-agent-test",
                 "initial_invocation_limit": 1,
                 "repair_invocation_limit": 1,
                 "retry_policy": "focused-verification-failure-only",

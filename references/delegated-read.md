@@ -2,7 +2,7 @@
 
 ## Scope
 
-Use for panel summaries, prioritization, or read-only diagnosis that changes no code, PM records, or external state. This is not a delivery strategy: do not create a delivery Task, Run, Attempt, Lease, visible Worker, or Heartbeat. Implementation, repair, and acceptance use the normal workflow.
+Use only when the current request explicitly selects a separate read-only agent and host policy permits it. It may summarize a panel, prioritize work, or diagnose without changing code, PM records, or external state. This is not a delivery strategy: do not create a Task, Run, Attempt, Lease, Worker, or Heartbeat. Implementation, repair, and acceptance use the normal workflow.
 
 ## Procedure
 

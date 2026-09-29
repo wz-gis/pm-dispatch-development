@@ -66,12 +66,14 @@ class ResolverCase(unittest.TestCase):
         self.assertIsNone(resolution["model_id"])
         self.assertEqual(resolution["provider_reasoning_effort"], "inherit")
 
-    def test_dispatch_without_heartbeat_requirement_does_not_force_full_scan(self) -> None:
+    def test_visible_codex_worker_without_heartbeat_fails_closed(self) -> None:
         dispatch = worker_dispatch()
         dispatch["heartbeat_required"] = False
         dispatch["required_capabilities"].remove("heartbeat")
-        resolution = self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
-        self.assertEqual(resolution["monitor_mode"], "event-lease")
+        with self.assertRaisesRegex(
+            self.resolver.ResolutionError, "no verified parent callback"
+        ):
+            self.resolver.resolve_dispatch(dispatch, self.adapters, NOW)
 
     def test_critical_profile_inherits_model_with_high_effort(self) -> None:
         dispatch = worker_dispatch()

@@ -21,9 +21,9 @@ Extract board, Git, dependencies, runtime, Gate, and usage facts with scripts. M
 
 Separate existing host conversation history from newly injected context; the Skill cannot clear host history.
 
-`check_coordinator_budget.py` reads available Codex session counters. It warns at 96K last-input tokens and blocks new Worker creation at 160K or 150 token-count records (the model-step proxy). Missing counters are `unknown`, not estimates. These are local policy thresholds, not model context limits.
+`check_coordinator_budget.py` provides advisory usage only. At 96K last-input tokens it recommends reducing newly injected context; it does not block dispatch or require another Coordinator. Lifetime `token_count` records are telemetry, not current context pressure. Missing counters are `unknown`. Legacy rollover fields and CLI options remain readable for compatibility but have no blocking effect.
 
-A fresh Coordinator increments `coordinator_epoch` and rebinds Heartbeat. Incrementing a number alone does not erase history. Do not create a new task without explicit user authorization; existing Workers may still be monitored and closed.
+Keep one project PM across tasks and Gates. First reduce context with compact Packets and supported in-place compaction. When migration is justified, prepare the handoff and obtain user approval before creating a replacement PM; follow `project-coordinator.md`. `coordinator_epoch` versions that approved transfer, not each bug or Run. Historical `handoff-required` reports are diagnostics, not migration permission or execution blockers.
 
 ## Monitoring And Delegation
 
@@ -31,6 +31,6 @@ Heartbeat runs `plan_monitor_tick.py`; `sleep` makes no Provider status call. `i
 
 Persist one liveness reconciliation after the snapshot. `diagnosis-required` permits one focused investigation; `awaiting-diagnosis` does not resend a prompt. A verified long command uses a fixed completion deadline. Terminal collection is deduplicated by its event; unchanged checks never rebuild Packets or reread recovery history. See `autonomy.md` only when a diagnosis is needed.
 
-Use `delegated-read.md` for a single read-only panel analysis. For publication, run `measure_context_baseline.py --public`: it exports aggregate counts only. Normal baseline output, Packets, Evidence, and session logs are not anonymized.
+When the current request explicitly selects a separate read-only agent and host policy permits it, use `delegated-read.md`. For publication, run `measure_context_baseline.py --public`: it exports aggregate counts only. Normal baseline output, Packets, Evidence, and session logs are not anonymized.
 
 Report cached input separately in token comparisons. Character counts, prompt caps, requested waiting time, elapsed time, and billed tokens are different measurements. Do not claim cross-task savings without a controlled baseline.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure a coordinator session and decide whether new dispatch may start."""
+"""Report advisory context usage without changing coordinator ownership."""
 
 from __future__ import annotations
 
@@ -60,15 +60,8 @@ def assess_usage(
     rollover_input_tokens: int = ROLLOVER_INPUT_TOKENS,
     max_model_steps: int = MAX_MODEL_STEPS,
 ) -> tuple[str, list[str]]:
-    reasons: list[str] = []
-    if last_input_tokens >= rollover_input_tokens:
-        reasons.append(
-            f"last input {last_input_tokens} >= rollover {rollover_input_tokens}"
-        )
-    if model_steps >= max_model_steps:
-        reasons.append(f"model steps {model_steps} >= rollover {max_model_steps}")
-    if reasons:
-        return "handoff-required", reasons
+    # Retain legacy arguments for callers; lifetime record counts do not measure
+    # current context pressure, and neither threshold authorizes a handoff.
     if last_input_tokens >= warn_input_tokens:
         return "warn", [f"last input {last_input_tokens} >= warning {warn_input_tokens}"]
     return "continue", []
@@ -195,7 +188,7 @@ def main() -> int:
     if args.output:
         atomic_write(Path(args.output).resolve(), report)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
-    return 2 if report["action"] == "handoff-required" else 0
+    return 0
 
 
 if __name__ == "__main__":

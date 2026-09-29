@@ -314,11 +314,11 @@
         "worker_reuse": {
           "type": ["object", "null"],
           "additionalProperties": false,
-          "required": ["mode", "reuse_across_gates", "max_runs_per_worker", "replacement_triggers"],
+          "required": ["mode", "reuse_across_gates", "replacement_triggers"],
           "properties": {
             "mode": {"type": "string", "enum": ["sticky", "isolated"]},
             "reuse_across_gates": {"type": "boolean"},
-            "max_runs_per_worker": {"type": "integer", "minimum": 1, "maximum": 8},
+            "max_runs_per_worker": {"type": "integer", "minimum": 1},
             "replacement_triggers": {
               "type": "array",
               "minItems": 1,

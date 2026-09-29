@@ -8,6 +8,18 @@ Load only for uncertainty, failed recovery, or Blocker decisions.
 - Ask only when local discovery cannot answer, alternatives materially change the outcome, and a wrong choice is costly or irreversible.
 - Warnings do not stop implementation. Validator errors block only their affected dispatch, Gate, or closure action.
 
+## User Decisions And Visibility
+
+Request only a decision actually needed and not already authorized. Prepare the proposed change, evidence, and tradeoffs first. For Codex, use `request_user_input_async` when available for user decisions or workflow approval; otherwise use another supported user-input UI only in modes and cases where that tool permits it. Do not assume a Plan-only tool is available in Default mode. Tool execution permissions still use the host's native approval mechanism, not a substitute decision card.
+
+Ask in the project PM conversation. Include the task ID, the concrete decision, why it matters, a short recommendation, and the reviewable artifact path. Offer a few meaningful options when useful. The host controls whether this appears as an inline card or dialog; do not claim a modal was shown without a successful tool result. Never ask for secrets in a card.
+
+Persist pending decisions in the existing task decisions record and `lifecycle.next_action`: what is awaiting the user, the proposal/evidence link, and when it was asked. Use a hard Blocker only if its established criteria apply. For a project-wide migration, use the coordination/handoff record and show a pending-decision note with the task panel; do not create a synthetic Bug solely to track the question.
+
+An asynchronous question stays pending until an actual reply arrives. Pause only work dependent on that decision and continue independent authorized work. A preselected option, silence, elapsed time, or an unrelated 'continue' is not approval. Heartbeats must not submit duplicate questions while the same decision is pending. On reply, record the answer and its reference, update the next action, and resume the approved work.
+
+If no suitable input UI is callable or the call fails, keep the pending record, tell the user that the confirmation card is unavailable, and ask one clear question in the main response. Never silently replace a failed approval UI with assumed consent. Ordinary progress updates do not require confirmation cards.
+
 ## Same-Worker Recovery
 
 A first command, build, test, or tool failure is not a Blocker and does not create an Attempt. The current Worker may retry the same method once, try up to two materially different alternatives, and run focused verification. Local implementation, file layout, and test commands may change within that Attempt.

@@ -82,6 +82,16 @@ class DispatchPreflightCase(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "active coordinator Heartbeat"):
                 self.preflight.assert_heartbeat_dispatch_ready(task_path, task, None)
 
+    def test_visible_codex_worker_cannot_disable_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            task, runtime = worker_bundle()
+            task["dispatch"]["heartbeat_required"] = False
+            runtime["heartbeat"] = None
+            task_path = self.write_bundle(Path(directory), task, runtime)
+
+            with self.assertRaisesRegex(ValueError, "no verified parent callback"):
+                self.preflight.assert_heartbeat_dispatch_ready(task_path, task, None)
+
     def test_worker_create_rejects_paused_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             task, runtime = worker_bundle()
@@ -119,7 +129,7 @@ class DispatchPreflightCase(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "deadline expired"):
                 self.preflight.assert_heartbeat_dispatch_ready(task_path, task, None)
 
-    def test_new_worker_is_blocked_when_coordinator_budget_requires_handoff(self) -> None:
+    def test_new_worker_keeps_coordinator_despite_context_warning_and_long_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             task, runtime = provisioning_bundle()
@@ -136,7 +146,7 @@ class DispatchPreflightCase(unittest.TestCase):
                                 "input_tokens": 1_000_000,
                                 "cached_input_tokens": 900_000,
                             },
-                            "last_token_usage": {"input_tokens": 20_000},
+                            "last_token_usage": {"input_tokens": 180_000},
                             "model_context_window": 258_400,
                         },
                     },
@@ -145,20 +155,23 @@ class DispatchPreflightCase(unittest.TestCase):
             (session_dir / "rollout-pm-1.jsonl").write_text(
                 "\n".join([token_record] * 150), encoding="utf-8"
             )
-            with self.assertRaisesRegex(ValueError, "new epoch"):
-                self.preflight.run_preflight(
-                    task_path,
-                    project_root=root,
-                    output_dir=root / "context",
-                    gate="implementation",
-                    focus=[],
-                    verification_commands=[],
-                    max_chars=6000,
-                    max_files=100,
-                    generated_at="2026-07-13T12:00:00Z",
-                    automation_dir=None,
-                    coordinator_session_dir=session_dir,
-                )
+            before_runtime = task_path.with_name("runtime.yaml").read_bytes()
+            result = self.preflight.run_preflight(
+                task_path,
+                project_root=root,
+                output_dir=root / "context",
+                gate="implementation",
+                focus=[],
+                verification_commands=[],
+                max_chars=6000,
+                max_files=100,
+                generated_at="2026-07-13T12:00:00Z",
+                automation_dir=None,
+                coordinator_session_dir=session_dir,
+            )
+            self.assertEqual(result["coordinator_budget"], "warn")
+            self.assertTrue(result["context_packet"])
+            self.assertEqual(task_path.with_name("runtime.yaml").read_bytes(), before_runtime)
 
 
 if __name__ == "__main__":

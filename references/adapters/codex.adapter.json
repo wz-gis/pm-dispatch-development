@@ -1,7 +1,7 @@
 {
   "schema_version": "3",
   "protocol_version": "2",
-  "adapter_version": "13",
+  "adapter_version": "15",
   "provider": "codex",
   "status_map": [
     {"provider_status": "created", "core_status": "queued"},
@@ -111,7 +111,7 @@
         }
     },
     "monitor": {
-      "modes": ["heartbeat", "event-lease", "manual"],
+      "modes": ["heartbeat"],
       "supports_lease_renewal": true,
       "heartbeat_operation": "automation_update",
       "heartbeat_target": "coordinator-thread",

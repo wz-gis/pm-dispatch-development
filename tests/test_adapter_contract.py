@@ -40,7 +40,7 @@ class AdapterContractCase(unittest.TestCase):
             {"worker", "reasoning", "monitor", "evidence"},
         )
         self.assertEqual(adapter["schema_version"], "3")
-        self.assertEqual(adapter["adapter_version"], "13")
+        self.assertEqual(adapter["adapter_version"], "15")
         worker = adapter["components"]["worker"]
         self.assertEqual(adapter["protocol_version"], "2")
         self.assertIn(worker["transport"], {"tool", "command", "api", "manual"})
@@ -86,7 +86,7 @@ class AdapterContractCase(unittest.TestCase):
         self.assertEqual(monitor["heartbeat_operation"], "automation_update")
         self.assertEqual(monitor["heartbeat_target"], "coordinator-thread")
         self.assertEqual(monitor["coordinator_binding"], "current-conversation")
-        self.assertIn("event-lease", monitor["modes"])
+        self.assertEqual(monitor["modes"], ["heartbeat"])
         self.assertEqual(monitor["event_wait_target"], "wait_threads")
         self.assertEqual(monitor["disconnect_probe_operation"], "inspect")
         self.assertEqual(monitor["inspection_interval_seconds"], 600)
@@ -94,9 +94,14 @@ class AdapterContractCase(unittest.TestCase):
         self.assertEqual(monitor["model_free_tick"], "scripts/plan_monitor_tick.py")
 
     def test_event_lease_adapter_requires_wait_and_watchdog_capabilities(self) -> None:
-        adapter = json.loads((ADAPTER_DIR / "codex.adapter.json").read_text(encoding="utf-8"))
+        adapter = json.loads((ADAPTER_DIR / "external-cli.adapter.json").read_text(encoding="utf-8"))
+        adapter["components"]["monitor"]["modes"].append("event-lease")
         adapter["components"]["monitor"]["event_wait_target"] = None
-        adapter["capabilities"].remove("lease-watchdog")
+        adapter["capabilities"] = [
+            capability
+            for capability in adapter["capabilities"]
+            if capability != "lease-watchdog"
+        ]
         errors = validator.validate_adapter_integrity(adapter, "adapter")
         self.assertTrue(any("event_wait_target" in error for error in errors))
         self.assertTrue(any("lease-watchdog" in error for error in errors))

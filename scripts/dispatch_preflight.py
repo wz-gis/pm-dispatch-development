@@ -19,6 +19,7 @@ from build_context_packet import build_context_packet, select_run  # noqa: E402
 from build_evidence_digest import build_evidence_digest  # noqa: E402
 from build_project_snapshot import build_project_snapshot  # noqa: E402
 from check_coordinator_budget import build_report, find_session  # noqa: E402
+from select_codex_execution import missing_tools  # noqa: E402
 from manage_recovery_ledger import (  # noqa: E402
     default_path,
     ensure_ledger,
@@ -64,8 +65,26 @@ def assert_heartbeat_dispatch_ready(
         effective = compose_task_runtime(task, runtime)
         dispatch = effective.get("dispatch") or {}
     resolution = dispatch.get("resolution") or {}
-    if resolution.get("provider") != "codex" or not dispatch.get("heartbeat_required"):
+    if resolution.get("provider") == "codex-subagent":
+        if (resolution.get("monitor_mode") != "milestone"
+                or resolution.get("worker_type") != "codex-subagent"
+                or "heartbeat" in dispatch.get("required_capabilities", [])
+                or dispatch.get("heartbeat_required") or dispatch.get("heartbeat")):
+            raise ValueError("native agents require milestone monitoring without Heartbeat")
+        run = select_run(effective.get("runs", []))
+        if not run:
+            raise ValueError("native agent dispatch requires a Run")
+        assert_provisioning_ready(run, now)
         return None
+    if resolution.get("provider") != "codex":
+        return None
+    if resolution.get("worker_type") != "codex-thread":
+        raise ValueError("Codex worker dispatch requires worker_type=codex-thread")
+    if dispatch.get("heartbeat_required") is not True:
+        raise ValueError(
+            "Visible Codex worker dispatch requires heartbeat_required=true because "
+            "create_thread has no verified parent callback"
+        )
     if resolution.get("monitor_mode") != "heartbeat":
         raise ValueError("Codex worker dispatch requires monitor_mode=heartbeat")
     heartbeat = dispatch.get("heartbeat")
@@ -77,7 +96,7 @@ def assert_heartbeat_dispatch_ready(
     if int(str(resolution.get("adapter_version") or "0")) >= 13 and not isinstance(
         heartbeat.get("coordinator_epoch"), int
     ):
-        raise ValueError("Codex v13 Heartbeat requires coordinator_epoch")
+        raise ValueError("Codex v13+ Heartbeat requires coordinator_epoch")
     target_run = next(
         (
             run
@@ -88,20 +107,7 @@ def assert_heartbeat_dispatch_ready(
     )
     if not isinstance(target_run, dict):
         raise ValueError("Codex worker dispatch Heartbeat target Run is missing")
-    if not target_run.get("worker_id"):
-        provisioning = target_run.get("provisioning")
-        if target_run.get("status") != "provisioning" or not isinstance(
-            provisioning, dict
-        ):
-            raise ValueError(
-                "Worker creation without worker_id requires a provisioning Run"
-            )
-        if provisioning.get("status") != "pending":
-            raise ValueError("Worker creation requires pending provisioning")
-        if parse_time(provisioning.get("deadline_at")) <= (
-            now or datetime.now(timezone.utc)
-        ):
-            raise ValueError("Worker provisioning deadline expired; roll it back")
+    assert_provisioning_ready(target_run, now)
     if automation_dir is not None:
         errors: list[str] = []
         validate_codex_heartbeat_automation(
@@ -113,6 +119,18 @@ def assert_heartbeat_dispatch_ready(
         if errors:
             raise ValueError("; ".join(errors))
     return str(heartbeat["automation_id"])
+
+
+def assert_provisioning_ready(run: dict, now: datetime | None) -> None:
+    if run.get("worker_id"):
+        return
+    provisioning = run.get("provisioning")
+    if run.get("status") != "provisioning" or not isinstance(provisioning, dict):
+        raise ValueError("Worker creation without worker_id requires a provisioning Run")
+    if provisioning.get("status") != "pending":
+        raise ValueError("Worker creation requires pending provisioning")
+    if parse_time(provisioning.get("deadline_at")) <= (now or datetime.now(timezone.utc)):
+        raise ValueError("Worker provisioning deadline expired; roll it back")
 
 
 def run_preflight(
@@ -132,6 +150,7 @@ def run_preflight(
     objective: str | None = None,
     purpose: str = "execute",
     recovery_attempt: str | None = None,
+    host_tools: list[str] | dict | None = None,
 ) -> dict[str, str | None]:
     task_path = task_path.resolve()
     project_root = project_root.resolve()
@@ -143,6 +162,11 @@ def run_preflight(
     runtime_path = runtime_file_for(task_path, task, None)
     runtime = load_structured_file(runtime_path) if runtime_path and runtime_path.exists() else None
     effective = compose_task_runtime(task, runtime)
+    if host_tools is not None and purpose == "execute":
+        provider = (effective.get("dispatch", {}).get("resolution") or {}).get("provider")
+        missing = missing_tools(provider, host_tools, effective.get("dispatch", {}).get("required_capabilities"))
+        if missing:
+            raise ValueError(f"unavailable host tools for {provider}: {missing}")
     run = select_run(effective.get("runs", []))
     effective_mode = mode or ("continuation" if run and run.get("worker_id") else "initial")
     schema_dir = SCRIPT_DIR.parent / "references" / "schemas"
@@ -194,22 +218,6 @@ def run_preflight(
         )
         if coordinator_errors:
             raise ValueError("invalid Coordinator Budget:\n" + "\n".join(coordinator_errors))
-        target_run = next(
-            (
-                run
-                for run in runtime.get("runs", [])
-                if run.get("run_id") == heartbeat.get("target_run_id")
-            ),
-            {},
-        )
-        if (
-            not target_run.get("worker_id")
-            and coordinator_report["action"] == "handoff-required"
-        ):
-            raise ValueError(
-                "Coordinator context budget requires a new epoch before Worker creation: "
-                + "; ".join(coordinator_report["reasons"])
-            )
         write_json(output_dir / "coordinator-budget.json", coordinator_report)
     configured_evidence = task.get("verification", {}).get("evidence_file")
     if configured_evidence:
@@ -290,6 +298,7 @@ def main() -> int:
     parser.add_argument("--max-chars", type=int, default=6000)
     parser.add_argument("--max-files", type=int, default=5000)
     parser.add_argument("--now")
+    parser.add_argument("--host-tools", help="JSON array of live tool names")
     parser.add_argument(
         "--automation-dir",
         help="Codex automations directory; defaults to $CODEX_HOME/automations",
@@ -338,6 +347,7 @@ def main() -> int:
         objective=args.objective,
         purpose=args.purpose,
         recovery_attempt=args.recovery_attempt,
+        host_tools=json.loads(Path(args.host_tools).read_text()) if args.host_tools else None,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

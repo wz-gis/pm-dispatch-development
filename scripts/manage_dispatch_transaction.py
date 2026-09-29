@@ -73,6 +73,11 @@ def current_attempt(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def require_active_heartbeat(runtime: dict[str, Any], run_id: str) -> None:
+    resolution = runtime.get("resolution") or {}
+    if resolution.get("provider") == "codex-subagent":
+        if resolution.get("monitor_mode") != "milestone" or runtime.get("heartbeat"):
+            raise DispatchTransactionError("native agents require milestone monitoring without Heartbeat")
+        return
     heartbeat = runtime.get("heartbeat")
     if not isinstance(heartbeat, dict) or heartbeat.get("status") != "active":
         raise DispatchTransactionError("provisioning requires an active coordinator Heartbeat")
@@ -119,8 +124,9 @@ def begin(
     attempt["started_at"] = attempt.get("started_at") or iso(now)
     attempt["finished_at"] = None
     attempt["lease"] = None
-    if run.get("provider") == "codex":
+    if run.get("provider") in {"codex", "codex-subagent"}:
         run.setdefault("wait_budget", new_wait_budget(iso(now)))
+    if run.get("provider") == "codex":
         run.setdefault("inspection_budget", new_inspection_budget(iso(now)))
     for lock in runtime.get("resources", {}).get("locks", []):
         if lock.get("status") == "active" and lock.get("holder_run_id") == run.get("run_id"):
@@ -202,7 +208,7 @@ def rollback(
     ):
         attempts = [item for item in run.get("attempts", []) if isinstance(item, dict)]
         return attempts[-1], "unchanged"
-    if not heartbeat_stopped:
+    if not heartbeat_stopped and (runtime.get("resolution") or {}).get("provider") != "codex-subagent":
         raise DispatchTransactionError(
             "pause or stop the external Heartbeat, then pass --heartbeat-stopped"
         )
