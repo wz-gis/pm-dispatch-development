@@ -1,0 +1,140 @@
+{
+  "schema_version": "3",
+  "protocol_version": "2",
+  "adapter_version": "15",
+  "provider": "codex",
+  "status_map": [
+    {"provider_status": "created", "core_status": "queued"},
+    {"provider_status": "queued", "core_status": "queued"},
+    {"provider_status": "pending", "core_status": "queued"},
+    {"provider_status": "idle", "core_status": "queued"},
+    {"provider_status": "interrupted", "core_status": "queued"},
+    {"provider_status": "running", "core_status": "running"},
+    {"provider_status": "in_progress", "core_status": "running"},
+    {"provider_status": "completed", "core_status": "succeeded"},
+    {"provider_status": "succeeded", "core_status": "succeeded"},
+    {"provider_status": "failed", "core_status": "failed"},
+    {"provider_status": "needs_attention", "core_status": "blocked"},
+    {"provider_status": "blocked", "core_status": "blocked"},
+    {"provider_status": "expired", "core_status": "expired"},
+    {"provider_status": "cancelled", "core_status": "cancelled"},
+    {"provider_status": "archived", "core_status": "cancelled"}
+  ],
+  "worker_types": ["codex-thread"],
+  "capabilities": [
+    "api",
+    "background-worker",
+    "browser",
+    "code-edit",
+    "git",
+    "heartbeat",
+    "lease-watchdog",
+    "milestone-notify",
+    "shell",
+    "sql",
+    "terminal-event-wait"
+  ],
+  "components": {
+    "worker": {
+      "transport": "tool",
+      "visibility": "user-visible",
+      "create": {
+        "target": "create_thread",
+        "input_fields": ["title", "prompt"],
+        "optional_input_fields": ["reasoning_effort"],
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": null, "event_cursor": null, "delegation": null},
+        "timeout_seconds": 120,
+        "idempotency": "required"
+      },
+      "send": {
+        "target": "send_message_to_thread",
+        "input_fields": ["worker_id", "prompt"],
+        "optional_input_fields": ["reasoning_effort", "continuation_token"],
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": null},
+        "timeout_seconds": 120,
+        "idempotency": "required"
+      },
+      "inspect": {
+        "target": "wait_threads",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": ["event_cursor"],
+        "fixed_inputs": {"timeout_ms": 0},
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": null},
+        "timeout_seconds": 30,
+        "idempotency": "none"
+      },
+      "wait": {
+        "target": "wait_threads",
+        "input_fields": ["worker_id", "timeout_ms"],
+        "optional_input_fields": ["event_cursor"],
+        "call_policy": {
+          "max_calls_per_run": 1,
+          "max_timeout_ms": 30000,
+          "allowed_sources": ["coordinator"]
+        },
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": "$"},
+        "timeout_seconds": 30,
+        "idempotency": "none"
+      },
+      "rebind": {
+        "target": "read_thread",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": ["continuation_token", "event_cursor"],
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": null},
+        "timeout_seconds": 30,
+        "idempotency": "optional"
+      },
+      "collect": {
+        "target": "read_thread",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": ["event_cursor"],
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": "$.continuationToken", "event_cursor": "$.cursor", "delegation": "$"},
+        "timeout_seconds": 60,
+        "idempotency": "none"
+      },
+      "cancel": {
+        "target": "set_thread_archived",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": [],
+        "result_paths": {"worker_id": "$.threadId", "status": "$.status", "continuation_token": null, "event_cursor": null, "delegation": null},
+        "timeout_seconds": 30,
+        "idempotency": "required"
+      },
+      "supports_background": true
+    },
+    "reasoning": {
+        "profiles": {
+          "fast": "inherit",
+          "standard": "inherit",
+          "deep": "high",
+          "critical": "high"
+        }
+    },
+    "monitor": {
+      "modes": ["heartbeat"],
+      "supports_lease_renewal": true,
+      "heartbeat_operation": "automation_update",
+      "heartbeat_target": "coordinator-thread",
+      "coordinator_binding": "current-conversation",
+      "event_wait_target": "wait_threads",
+      "disconnect_probe_operation": "inspect",
+      "inspection_interval_seconds": 600,
+      "max_inspections_per_cycle": 1,
+      "model_free_tick": "scripts/plan_monitor_tick.py"
+    },
+    "evidence": {
+      "artifact_kinds": [
+        "api",
+        "browser",
+        "command",
+        "id",
+        "log",
+        "release_path",
+        "screenshot",
+        "sql",
+        "upgrade_path"
+      ],
+      "sources": ["automation", "codex-browser", "git", "shell"]
+    }
+  }
+}

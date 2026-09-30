@@ -1,0 +1,202 @@
+{
+  "schema_version": "3",
+  "protocol_version": "2",
+  "adapter_version": "1",
+  "provider": "codex-subagent",
+  "status_map": [
+    {
+      "provider_status": "pending_init",
+      "core_status": "queued"
+    },
+    {
+      "provider_status": "running",
+      "core_status": "running"
+    },
+    {
+      "provider_status": "interrupted",
+      "core_status": "blocked"
+    },
+    {
+      "provider_status": "completed",
+      "core_status": "succeeded"
+    },
+    {
+      "provider_status": "errored",
+      "core_status": "failed"
+    },
+    {
+      "provider_status": "shutdown",
+      "core_status": "cancelled"
+    }
+  ],
+  "worker_types": [
+    "codex-subagent"
+  ],
+  "capabilities": [
+    "code-edit",
+    "git",
+    "shell",
+    "milestone-notify",
+    "terminal-event-wait"
+  ],
+  "components": {
+    "worker": {
+      "transport": "tool",
+      "visibility": "internal",
+      "create": {
+        "target": "spawn_agent",
+        "input_fields": [
+          "prompt"
+        ],
+        "optional_input_fields": [],
+        "result_paths": {
+          "worker_id": "$.agent_id",
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": null
+        },
+        "timeout_seconds": 30,
+        "idempotency": "required"
+      },
+      "send": {
+        "target": "send_input",
+        "input_fields": [
+          "worker_id",
+          "prompt"
+        ],
+        "optional_input_fields": [
+          "interrupt"
+        ],
+        "result_paths": {
+          "worker_id": null,
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": null
+        },
+        "timeout_seconds": 30,
+        "idempotency": "required"
+      },
+      "inspect": {
+        "target": "unsupported",
+        "input_fields": [
+          "worker_id"
+        ],
+        "optional_input_fields": [],
+        "supported": false,
+        "result_paths": {
+          "worker_id": null,
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": null
+        },
+        "timeout_seconds": 30,
+        "idempotency": "none"
+      },
+      "wait": {
+        "target": "wait_agent",
+        "input_fields": [
+          "worker_id",
+          "timeout_ms"
+        ],
+        "optional_input_fields": [],
+        "result_paths": {
+          "worker_id": null,
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": "$"
+        },
+        "timeout_seconds": 30,
+        "idempotency": "none",
+        "call_policy": {
+          "max_calls_per_run": 1,
+          "max_timeout_ms": 30000,
+          "allowed_sources": [
+            "coordinator"
+          ]
+        }
+      },
+      "rebind": {
+        "target": "unsupported",
+        "input_fields": [
+          "worker_id"
+        ],
+        "optional_input_fields": [],
+        "supported": false,
+        "result_paths": {
+          "worker_id": null,
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": null
+        },
+        "timeout_seconds": 30,
+        "idempotency": "none"
+      },
+      "collect": {
+        "target": "parent-notification",
+        "input_fields": [
+          "worker_id"
+        ],
+        "optional_input_fields": [],
+        "supported": false,
+        "result_paths": {
+          "worker_id": null,
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": "$"
+        },
+        "timeout_seconds": 30,
+        "idempotency": "none"
+      },
+      "cancel": {
+        "target": "close_agent",
+        "input_fields": [
+          "worker_id"
+        ],
+        "optional_input_fields": [],
+        "result_paths": {
+          "worker_id": null,
+          "status": "$.status",
+          "continuation_token": null,
+          "event_cursor": null,
+          "delegation": null
+        },
+        "timeout_seconds": 30,
+        "idempotency": "required"
+      },
+      "supports_background": false
+    },
+    "reasoning": {
+      "profiles": {
+        "fast": "inherit",
+        "standard": "inherit",
+        "deep": "inherit",
+        "critical": "inherit"
+      }
+    },
+    "monitor": {
+      "modes": [
+        "milestone"
+      ],
+      "supports_lease_renewal": false,
+      "event_wait_target": "wait_agent",
+      "disconnect_probe_operation": "inspect"
+    },
+    "evidence": {
+      "artifact_kinds": [
+        "command",
+        "log",
+        "id"
+      ],
+      "sources": [
+        "shell",
+        "git"
+      ]
+    }
+  }
+}

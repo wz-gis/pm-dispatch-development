@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pm-dispatch.local/project-snapshot.schema.json",
+  "title": "PM Dispatch Project Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "derived", "root", "git", "file_index", "focus", "budget", "generated_at", "snapshot_sha256"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1"]},
+    "derived": {"type": "boolean", "enum": [true]},
+    "root": {"type": "string", "minLength": 1},
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "head", "branch", "dirty_paths", "omitted_dirty_paths", "status_sha256"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "head": {"type": ["string", "null"]},
+        "branch": {"type": ["string", "null"]},
+        "dirty_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "omitted_dirty_paths": {"type": "integer", "minimum": 0},
+        "status_sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "file_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanned_files", "truncated", "top_level_counts", "extension_counts"],
+      "properties": {
+        "scanned_files": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "top_level_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "extension_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "focus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "state", "size_bytes", "line_count", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "state": {"type": "string", "enum": ["file", "directory", "missing"]},
+          "size_bytes": {"type": ["integer", "null"], "minimum": 0},
+          "line_count": {"type": ["integer", "null"], "minimum": 0},
+          "sha256": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_chars", "max_files"],
+      "properties": {
+        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 12000},
+        "max_files": {"type": "integer", "minimum": 1, "maximum": 50000}
+      }
+    },
+    "generated_at": {"type": "string", "format": "date-time"},
+    "snapshot_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

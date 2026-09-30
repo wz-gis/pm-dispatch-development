@@ -1,0 +1,105 @@
+{
+  "schema_version": "3",
+  "protocol_version": "2",
+  "adapter_version": "5",
+  "provider": "external-cli",
+  "status_map": [
+    {"provider_status": "queued", "core_status": "queued"},
+    {"provider_status": "running", "core_status": "running"},
+    {"provider_status": "completed", "core_status": "succeeded"},
+    {"provider_status": "failed", "core_status": "failed"},
+    {"provider_status": "blocked", "core_status": "blocked"},
+    {"provider_status": "expired", "core_status": "expired"},
+    {"provider_status": "cancelled", "core_status": "cancelled"}
+  ],
+  "worker_types": ["agent-thread"],
+  "capabilities": [
+    "api",
+    "background-worker",
+    "code-edit",
+    "git",
+    "shell",
+    "sql"
+  ],
+  "components": {
+    "worker": {
+      "transport": "command",
+      "visibility": "provider-visible",
+      "create": {
+        "target": "agent start --json",
+        "input_fields": ["title", "prompt", "reasoning_effort"],
+        "optional_input_fields": [],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": null},
+        "timeout_seconds": 120,
+        "idempotency": "required"
+      },
+      "send": {
+        "target": "agent send --json",
+        "input_fields": ["worker_id", "prompt", "continuation_token"],
+        "optional_input_fields": ["reasoning_effort"],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": null},
+        "timeout_seconds": 120,
+        "idempotency": "required"
+      },
+      "inspect": {
+        "target": "agent status --json",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": [],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": null},
+        "timeout_seconds": 30,
+        "idempotency": "none"
+      },
+      "wait": {
+        "target": "agent wait --json",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": ["event_cursor", "timeout_ms"],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": "$.delegation"},
+        "timeout_seconds": 120,
+        "idempotency": "none"
+      },
+      "rebind": {
+        "target": "agent resume --json",
+        "input_fields": ["worker_id", "continuation_token"],
+        "optional_input_fields": ["event_cursor"],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": null},
+        "timeout_seconds": 60,
+        "idempotency": "required"
+      },
+      "collect": {
+        "target": "agent collect --json",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": ["event_cursor"],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": "$.delegation"},
+        "timeout_seconds": 60,
+        "idempotency": "none"
+      },
+      "cancel": {
+        "target": "agent cancel --json",
+        "input_fields": ["worker_id"],
+        "optional_input_fields": [],
+        "result_paths": {"worker_id": "$.worker_id", "status": "$.status", "continuation_token": "$.continuation_token", "event_cursor": "$.event_cursor", "delegation": null},
+        "timeout_seconds": 30,
+        "idempotency": "required"
+      },
+      "supports_background": true
+    },
+    "reasoning": {
+      "profiles": {
+        "fast": "quick",
+        "standard": "normal",
+        "deep": "deliberate",
+        "critical": "maximum"
+      }
+    },
+    "monitor": {
+      "modes": ["poll", "manual"],
+      "supports_lease_renewal": false,
+      "event_wait_target": null,
+      "disconnect_probe_operation": "inspect"
+    },
+    "evidence": {
+      "artifact_kinds": ["api", "command", "id", "log", "sql"],
+      "sources": ["external-agent", "git", "shell"]
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "actionable_panel_chars": 1928,
+  "actionable_vs_all_reduction_pct": 79.65,
+  "actionable_vs_board_reduction_pct": 92.87,
+  "all_panel_chars": 9472,
+  "board_chars": 27038,
+  "evidence_file_count": 20,
+  "excluded_task_documents": 2,
+  "measured_on": "2026-09-04",
+  "measurement": "Unicode character counts, not model tokens, cost, or elapsed time.",
+  "prompt_file_count": 190,
+  "public_aggregate": true,
+  "schema_version": "1",
+  "selection": "One project; canonical task directories; legacy taskId normalized; IDs deduplicated.",
+  "source_chars": 938696,
+  "task_count": 48,
+  "task_types": {
+    "bug": 37,
+    "chore": 0,
+    "environment": 0,
+    "onboarding": 0,
+    "release": 1,
+    "spec": 10,
+    "unknown": 0
+  }
+}

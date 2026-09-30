@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pm-dispatch.local/runtime-event.schema.json",
+  "title": "PM Dispatch Runtime Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "task_id", "occurred_at", "run_id", "attempt_id", "provider", "worker_id", "payload"],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["1"]},
+    "event_id": {"type": "string", "minLength": 1},
+    "event_type": {"type": "string", "enum": ["resolution-selected", "dispatch-provisioning-started", "dispatch-provisioning-completed", "dispatch-provisioning-rolled-back", "worker-created", "prompt-sent", "status-inspect-authorized", "status-observed", "lease-renewed", "milestone", "worker-rebound", "terminal-wait-authorized", "terminal-wait-finished", "terminal-collected", "lock-acquired", "lock-released"]},
+    "task_id": {"type": "string", "pattern": "^(BUG|SPEC|ONBOARD|RELEASE|ENV|CHORE)-[0-9]{3}$"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "run_id": {"type": ["string", "null"]},
+    "attempt_id": {"type": ["string", "null"]},
+    "provider": {"type": ["string", "null"]},
+    "worker_id": {"type": ["string", "null"]},
+    "payload": {"type": "object"}
+  }
+}

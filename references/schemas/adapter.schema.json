@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pm-dispatch.local/adapter.schema.json",
+  "title": "PM Dispatch Provider Adapter",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol_version",
+    "adapter_version",
+    "provider",
+    "status_map",
+    "worker_types",
+    "capabilities",
+    "components"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "enum": ["3"]},
+    "protocol_version": {"type": "string", "enum": ["2"]},
+    "adapter_version": {"type": "string", "pattern": "^[0-9]+$"},
+    "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+    "status_map": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider_status", "core_status"],
+        "properties": {
+          "provider_status": {"type": "string", "minLength": 1},
+          "core_status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "blocked", "expired", "cancelled"]}
+        }
+      }
+    },
+    "worker_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker", "reasoning", "monitor", "evidence"],
+      "properties": {
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transport", "visibility", "create", "send", "inspect", "wait", "rebind", "collect", "cancel", "supports_background"],
+          "properties": {
+            "transport": {"type": "string", "enum": ["tool", "command", "api", "manual"]},
+            "visibility": {"type": "string", "enum": ["user-visible", "provider-visible", "internal"]},
+            "create": {"$ref": "#/$defs/worker_operation"},
+            "send": {"$ref": "#/$defs/worker_operation"},
+            "inspect": {"$ref": "#/$defs/worker_operation"},
+            "wait": {"$ref": "#/$defs/worker_operation"},
+            "rebind": {"$ref": "#/$defs/worker_operation"},
+            "collect": {"$ref": "#/$defs/worker_operation"},
+            "cancel": {"$ref": "#/$defs/worker_operation"},
+            "supports_background": {"type": "boolean"}
+          }
+        },
+        "reasoning": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profiles"],
+          "properties": {
+            "profiles": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "fast": {"type": "string", "minLength": 1},
+                "standard": {"type": "string", "minLength": 1},
+                "deep": {"type": "string", "minLength": 1},
+                "critical": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profiles"],
+          "properties": {
+            "profiles": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["fast", "standard", "deep", "critical"],
+              "properties": {
+                "fast": {"$ref": "#/$defs/model_route"},
+                "standard": {"$ref": "#/$defs/model_route"},
+                "deep": {"$ref": "#/$defs/model_route"},
+                "critical": {"$ref": "#/$defs/model_route"}
+              }
+            }
+          }
+        },
+        "monitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["modes", "supports_lease_renewal", "event_wait_target", "disconnect_probe_operation"],
+          "properties": {
+            "modes": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "enum": ["event-lease", "milestone", "heartbeat", "poll", "manual"]}
+            },
+            "supports_lease_renewal": {"type": "boolean"},
+            "heartbeat_operation": {"type": "string", "minLength": 1},
+            "heartbeat_target": {"type": "string", "enum": ["coordinator-thread"]},
+            "coordinator_binding": {"type": "string", "enum": ["current-conversation", "declared-thread", "provider-managed"]},
+            "event_wait_target": {"type": ["string", "null"], "minLength": 1},
+            "disconnect_probe_operation": {"type": "string", "enum": ["inspect"]},
+            "inspection_interval_seconds": {"type": "integer", "minimum": 1},
+            "max_inspections_per_cycle": {"type": "integer", "minimum": 1},
+            "model_free_tick": {"type": "string", "minLength": 1}
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_kinds", "sources"],
+          "properties": {
+            "artifact_kinds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"}
+            },
+            "sources": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "worker_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "input_fields", "optional_input_fields", "result_paths", "timeout_seconds", "idempotency"],
+      "properties": {
+        "target": {"type": "string", "minLength": 1},
+        "supported": {"type": "boolean"},
+        "input_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+        },
+        "optional_input_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+        },
+        "fixed_inputs": {
+          "type": "object"
+        },
+        "call_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_calls_per_run", "max_timeout_ms", "allowed_sources"],
+          "properties": {
+            "max_calls_per_run": {"type": "integer", "minimum": 1},
+            "max_timeout_ms": {"type": "integer", "minimum": 1},
+            "allowed_sources": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "enum": ["coordinator", "heartbeat"]}
+            }
+          }
+        },
+        "result_paths": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["worker_id", "status", "continuation_token", "event_cursor", "delegation"],
+          "properties": {
+            "worker_id": {"type": ["string", "null"]},
+            "status": {"type": "string", "minLength": 1},
+            "continuation_token": {"type": ["string", "null"]},
+            "event_cursor": {"type": ["string", "null"]},
+            "delegation": {"type": ["string", "null"]}
+          }
+        },
+        "timeout_seconds": {"type": "integer", "minimum": 1},
+        "idempotency": {"type": "string", "enum": ["required", "optional", "none"]}
+      }
+    },
+    "model_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "complexity", "reasoning_effort"],
+      "properties": {
+        "model_id": {"type": "string", "minLength": 1},
+        "complexity": {"type": "string", "enum": ["simple", "complex"]},
+        "reasoning_effort": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
